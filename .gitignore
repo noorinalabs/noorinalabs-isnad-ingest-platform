@@ -1,0 +1,65 @@
+# Data directories (keep .gitkeep)
+data/raw/*
+data/staging/*
+data/curated/*
+data/reports/*
+!data/**/.gitkeep
+*.parquet
+*.arrow
+*.feather
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ML/NLP artifacts
+*.bin
+*.pt
+*.onnx
+models_cache/
+embeddings_cache/
+faiss_index/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Claude Code project data
+.claude/projects/
+
+# Logs
+*.log
+logs/
