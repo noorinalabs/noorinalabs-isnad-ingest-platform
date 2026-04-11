@@ -59,6 +59,8 @@ faiss_index/
 
 # Claude Code project data
 .claude/projects/
+.claude/annunaki/errors.jsonl
+.claude/annunaki/errors.jsonl.bak.*
 
 # Logs
 *.log
