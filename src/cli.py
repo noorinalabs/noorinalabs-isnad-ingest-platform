@@ -395,6 +395,121 @@ def _cmd_audit(*, last_n: int = 10) -> None:
         print()
 
 
+def _cmd_reset(
+    *,
+    stage: str | None,
+    source: str | None,
+    full: bool,
+    assume_yes: bool,
+    dry_run: bool,
+) -> None:
+    """Execute a pipeline reset. Writes an audit entry for every run."""
+    from pathlib import Path
+
+    from src.config import get_settings
+    from src.pipeline.reset import PipelineResetter, ResetScope
+
+    # Build the scope first — validates inputs before any confirmation.
+    provided = sum(1 for f in (stage, source, full) if f)
+    if provided != 1:
+        print("ERROR: reset requires exactly one of --stage, --source, --all.")
+        sys.exit(2)
+
+    if stage:
+        scope = ResetScope.stage_scope(stage)
+        summary_line = f"STAGE reset: prefix '{stage}/' and consumer offsets"
+    elif source:
+        scope = ResetScope.source_scope(source)
+        summary_line = f"SOURCE reset: all stage prefixes for source '{source}'"
+    else:
+        scope = ResetScope.full_scope()
+        summary_line = (
+            "FULL reset: every pipeline B2 prefix, every pipeline Kafka topic, "
+            "Neo4j hadith graph, PG hadith metadata. "
+            "Users/roles/sessions are PRESERVED."
+        )
+
+    print(f"=== Pipeline Reset ===\n  {summary_line}\n")
+
+    if scope.level == "full" and not assume_yes:
+        confirm = input("Type 'OBLITERATE' to proceed: ").strip()
+        if confirm != "OBLITERATE":
+            print("Aborted.")
+            sys.exit(1)
+
+    if dry_run:
+        print("Dry run — no changes were made. Scope validated.")
+        return
+
+    settings = get_settings()
+    object_store, kafka_admin, neo4j, pg = _build_reset_clients(settings)
+
+    resetter = PipelineResetter(
+        object_store=object_store,
+        kafka_admin=kafka_admin,
+        neo4j=neo4j,
+        pg=pg,
+        data_dir=Path(settings.data_raw_dir).parent,
+    )
+    report, _entry, audit_path = resetter.reset(scope)
+
+    print("\n=== Reset Complete ===")
+    print(f"  Level              : {report.level}")
+    print(f"  S3 prefixes deleted: {len(report.s3_prefixes_deleted)}")
+    print(f"  S3 objects deleted : {report.s3_objects_deleted}")
+    print(f"  Kafka topics reset : {len(report.kafka_topics_reset)}")
+    if report.level == "full":
+        print(f"  Neo4j rows deleted : {report.neo4j_rows_deleted}")
+        print(f"  PG rows deleted    : {report.pg_rows_deleted}")
+    print(f"  Duration (s)       : {report.duration_seconds}")
+    print(f"  Audit entry        : {audit_path}")
+
+
+def _build_reset_clients(settings: object) -> tuple[object, object, object, object]:
+    """Construct the four reset adapters from settings. Isolated for testability."""
+    # Imports kept inside the helper so unit tests that call _cmd_reset
+    # via monkey-patched adapters don't drag in kafka/neo4j/boto3.
+    import os
+
+    import boto3  # type: ignore[import-untyped]
+    import psycopg
+    from kafka.admin import KafkaAdminClient  # type: ignore[import-untyped]
+    from neo4j import GraphDatabase
+
+    from src.pipeline.reset_adapters import (
+        KafkaPythonAdmin,
+        Neo4jHadithResetter,
+        PgHadithMetadataResetter,
+    )
+
+    class _Store:
+        def __init__(self, bucket: str, endpoint_url: str | None) -> None:
+            self.bucket = bucket
+            self._client = boto3.client(
+                "s3", **({"endpoint_url": endpoint_url} if endpoint_url else {})
+            )
+
+        @property
+        def client(self) -> object:
+            return self._client
+
+    bucket = os.environ.get("PIPELINE_BUCKET", "noorinalabs-pipeline")
+    endpoint_url = os.environ.get("S3_ENDPOINT_URL")
+    bootstrap = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
+
+    neo4j_cfg = getattr(settings, "neo4j")
+    pg_cfg = getattr(settings, "postgres")
+
+    return (
+        _Store(bucket=bucket, endpoint_url=endpoint_url),
+        KafkaPythonAdmin(KafkaAdminClient(bootstrap_servers=bootstrap)),
+        Neo4jHadithResetter(
+            GraphDatabase.driver(neo4j_cfg.uri, auth=(neo4j_cfg.user, neo4j_cfg.password))
+        ),
+        PgHadithMetadataResetter(psycopg.connect(pg_cfg.dsn)),
+    )
+
+
 def _cmd_pipeline() -> None:
     """Run the full pipeline: acquire -> parse -> resolve -> load -> enrich."""
     print("=== Full Pipeline Run ===\n")
@@ -495,6 +610,37 @@ def main() -> None:
 
     subparsers.add_parser("pipeline", help="Run the full pipeline end-to-end")
 
+    reset_parser = subparsers.add_parser(
+        "reset",
+        help="Reset pipeline state (stage, source, or full). Writes audit log.",
+    )
+    reset_group = reset_parser.add_mutually_exclusive_group(required=True)
+    reset_group.add_argument(
+        "--stage",
+        choices=["raw", "dedup", "enriched", "normalized", "staged"],
+        help="Wipe one B2 stage prefix + reset that stage's Kafka consumer offsets",
+    )
+    reset_group.add_argument(
+        "--source",
+        type=str,
+        help="Wipe all stage prefixes for one data source (e.g. sunnah-api)",
+    )
+    reset_group.add_argument(
+        "--all",
+        action="store_true",
+        help="Full reset: every prefix, every topic, Neo4j + PG hadith data (preserves users)",
+    )
+    reset_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the 'OBLITERATE' confirmation for --all. Required for non-interactive runs.",
+    )
+    reset_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate scope and print what would be reset without touching anything.",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -541,6 +687,14 @@ def main() -> None:
         _cmd_audit(last_n=args.last)
     elif args.command == "pipeline":
         _cmd_pipeline()
+    elif args.command == "reset":
+        _cmd_reset(
+            stage=args.stage,
+            source=args.source,
+            full=args.all,
+            assume_yes=args.yes,
+            dry_run=args.dry_run,
+        )
 
 
 if __name__ == "__main__":
