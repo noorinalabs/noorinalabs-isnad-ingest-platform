@@ -1,0 +1,72 @@
+# Local-dev docker-compose for the streaming pipeline.
+#
+# This stub ships only the worker services — the Kafka broker, MinIO,
+# and Neo4j come from noorinalabs-deploy and are wired in via external
+# networks in the production compose. For a self-contained local smoke
+# test, uncomment the infra services below.
+#
+# Smoke test:
+#   export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+#   export PIPELINE_BUCKET=noorinalabs-pipeline
+#   export S3_ENDPOINT_URL=http://minio:9000
+#   docker compose up --build
+
+services:
+  dedup-worker:
+    build:
+      context: .
+      dockerfile: workers/dedup/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      PIPELINE_BUCKET: ${PIPELINE_BUCKET:-noorinalabs-pipeline}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minio12345}
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+    restart: on-failure
+
+  enrich-worker:
+    build:
+      context: .
+      dockerfile: workers/enrich/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      PIPELINE_BUCKET: ${PIPELINE_BUCKET:-noorinalabs-pipeline}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minio12345}
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+    restart: on-failure
+
+  normalize-worker:
+    build:
+      context: .
+      dockerfile: workers/normalize/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      PIPELINE_BUCKET: ${PIPELINE_BUCKET:-noorinalabs-pipeline}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minio12345}
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+    restart: on-failure
+
+  ingest-worker:
+    build:
+      context: .
+      dockerfile: workers/ingest/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      PIPELINE_BUCKET: ${PIPELINE_BUCKET:-noorinalabs-pipeline}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minio12345}
+      NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme}
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+    restart: on-failure
