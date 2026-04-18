@@ -1,4 +1,4 @@
-.PHONY: help setup setup-hooks acquire parse resolve load enrich pipeline test test-integration lint format typecheck check clean validate validate-staging profile-data
+.PHONY: help setup setup-hooks acquire parse resolve load enrich pipeline test test-integration test-workers lint lint-workers format format-workers typecheck check clean validate validate-staging profile-data build-workers
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -38,11 +38,26 @@ test: ## Run pytest suite
 test-integration: ## Run integration tests (requires Docker)
 	uv run pytest tests/integration/ -v -m integration
 
+test-workers: ## Run streaming-worker unit tests (no Docker/Kafka required)
+	uv run pytest tests/workers/ -v --confcutdir=tests/workers
+
 lint: ## Run ruff linter
-	uv run ruff check src/ tests/
+	uv run ruff check src/ workers/ tests/
+
+lint-workers: ## Ruff on workers package only
+	uv run ruff check workers/ tests/workers/
 
 format: ## Run ruff formatter
-	uv run ruff format src/ tests/
+	uv run ruff format src/ workers/ tests/
+
+format-workers: ## Ruff format on workers package only
+	uv run ruff format workers/ tests/workers/
+
+build-workers: ## Build all 4 worker Docker images
+	docker build -f workers/dedup/Dockerfile     -t dedup-worker:dev     .
+	docker build -f workers/enrich/Dockerfile    -t enrich-worker:dev    .
+	docker build -f workers/normalize/Dockerfile -t normalize-worker:dev .
+	docker build -f workers/ingest/Dockerfile    -t ingest-worker:dev    .
 
 typecheck: ## Run mypy type checker
 	uv run mypy src/
