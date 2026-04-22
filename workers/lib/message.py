@@ -36,7 +36,14 @@ class PipelineMessage(BaseModel):
     batch_id: str = Field(..., description="UUID identifying this processing batch")
     source: str = Field(..., description="Data source identifier, e.g. 'sunnah-api'")
     b2_path: str = Field(
-        ..., description="S3 object key, e.g. 'raw/sunnah-api/2026-04-13/x.parquet'"
+        ...,
+        description=(
+            "S3 path. Two forms (both valid — the consumer stage dictates which): "
+            "(1) a single object key, e.g. 'raw/sunnah-api/2026-04-13/x.parquet'; "
+            "(2) a folder prefix with a trailing slash, e.g. 'normalized/<batch_id>/', "
+            "used by the normalize→ingest hand-off (#192 D-ii) where ingest reads "
+            "'_MANIFEST.json' under the prefix to discover the per-label Parquets."
+        ),
     )
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(UTC),

@@ -8,6 +8,7 @@ from workers.dedup.processor import DedupProcessor
 from workers.lib.log import configure_logging, get_logger
 from workers.lib.object_store import ObjectStore
 from workers.lib.runner import WorkerRunner, WorkerSettings
+from workers.lib.topics import PIPELINE_DEDUP_DONE, PIPELINE_RAW_LANDED
 
 _logger = get_logger("workers.dedup")
 
@@ -23,8 +24,8 @@ def build_runner() -> WorkerRunner:
 
     settings = WorkerSettings(
         worker_name="dedup-worker",
-        consume_topic="pipeline.raw.new",
-        produce_topic="pipeline.dedup.done",
+        consume_topic=PIPELINE_RAW_LANDED,
+        produce_topic=PIPELINE_DEDUP_DONE,
         consumer_group="dedup-worker",
     )
     consumer = KafkaConsumer(
