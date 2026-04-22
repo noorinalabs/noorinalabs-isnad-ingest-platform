@@ -7,6 +7,7 @@ import os
 from workers.lib.log import configure_logging, get_logger
 from workers.lib.object_store import ObjectStore
 from workers.lib.runner import WorkerRunner, WorkerSettings
+from workers.lib.topics import PIPELINE_ENRICH_DONE, PIPELINE_NORMALIZE_DONE
 from workers.normalize.processor import NormalizeProcessor
 
 _logger = get_logger("workers.normalize")
@@ -21,8 +22,8 @@ def build_runner() -> WorkerRunner:
 
     settings = WorkerSettings(
         worker_name="normalize-worker",
-        consume_topic="pipeline.enrich.done",
-        produce_topic="pipeline.norm.done",
+        consume_topic=PIPELINE_ENRICH_DONE,
+        produce_topic=PIPELINE_NORMALIZE_DONE,
         consumer_group="normalize-worker",
     )
     consumer = KafkaConsumer(

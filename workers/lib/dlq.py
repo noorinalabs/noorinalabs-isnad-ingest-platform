@@ -14,10 +14,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from workers.lib.message import PipelineMessage
+from workers.lib.topics import PIPELINE_DLQ
 
-__all__ = ["DLQRecord", "build_dlq_record"]
+__all__ = ["DLQ_TOPIC", "DLQRecord", "build_dlq_record"]
 
-DLQ_TOPIC = "pipeline.dlq"
+# Backwards-compatible alias — runner.py and tests still import DLQ_TOPIC.
+# The canonical name is workers.lib.topics.PIPELINE_DLQ.
+DLQ_TOPIC = PIPELINE_DLQ
 
 
 class DLQRecord:

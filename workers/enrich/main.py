@@ -8,6 +8,7 @@ from workers.enrich.processor import EnrichProcessor
 from workers.lib.log import configure_logging, get_logger
 from workers.lib.object_store import ObjectStore
 from workers.lib.runner import WorkerRunner, WorkerSettings
+from workers.lib.topics import PIPELINE_DEDUP_DONE, PIPELINE_ENRICH_DONE
 
 _logger = get_logger("workers.enrich")
 
@@ -21,8 +22,8 @@ def build_runner() -> WorkerRunner:
 
     settings = WorkerSettings(
         worker_name="enrich-worker",
-        consume_topic="pipeline.dedup.done",
-        produce_topic="pipeline.enrich.done",
+        consume_topic=PIPELINE_DEDUP_DONE,
+        produce_topic=PIPELINE_ENRICH_DONE,
         consumer_group="enrich-worker",
     )
     consumer = KafkaConsumer(
