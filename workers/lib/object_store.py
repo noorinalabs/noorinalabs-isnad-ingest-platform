@@ -58,3 +58,19 @@ class ObjectStore:
     ) -> None:
         """Upload ``data`` to ``key`` in the configured bucket."""
         self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
+
+    def rename_object(self, src_key: str, dst_key: str) -> None:
+        """Atomically rename ``src_key`` to ``dst_key`` within the bucket.
+
+        Implemented as server-side copy + delete: ``CopyObject`` is atomic
+        from the reader's perspective (the destination either exists fully
+        or not at all), and the subsequent delete reclaims the source key.
+        Used by normalize (#192 D-ii) to stage per-label Parquets as
+        ``.part`` files and promote them once the write succeeds.
+        """
+        self.client.copy_object(
+            Bucket=self.bucket,
+            Key=dst_key,
+            CopySource={"Bucket": self.bucket, "Key": src_key},
+        )
+        self.client.delete_object(Bucket=self.bucket, Key=src_key)

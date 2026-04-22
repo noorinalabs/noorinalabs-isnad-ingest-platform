@@ -59,6 +59,16 @@ class FakeS3Client:
     def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str = "") -> None:
         self.objects[(Bucket, Key)] = Body
 
+    def copy_object(self, *, Bucket: str, Key: str, CopySource: dict[str, str]) -> dict[str, Any]:
+        src_bucket = CopySource["Bucket"]
+        src_key = CopySource["Key"]
+        self.objects[(Bucket, Key)] = self.objects[(src_bucket, src_key)]
+        return {}
+
+    def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        self.objects.pop((Bucket, Key), None)
+        return {}
+
 
 @pytest.fixture
 def fake_s3() -> FakeS3Client:

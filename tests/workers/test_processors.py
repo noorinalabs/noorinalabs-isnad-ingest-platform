@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,7 +24,7 @@ import pytest
 
 from src.parse.schemas import HADITH_SCHEMA
 from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
-from tests.workers.conftest import build_hadith_parquet
+from tests.workers.conftest import FakeS3Client, build_hadith_parquet
 from workers.dedup.processor import DedupProcessor
 from workers.enrich.processor import HADITH_TOPICS_SCHEMA, EnrichProcessor
 from workers.ingest.processor import IngestProcessor
@@ -257,7 +258,24 @@ class TestEnrichProcessor:
 
 
 class TestNormalizeProcessor:
-    def test_pass_through_when_schema_already_matches(
+    """Post-#192 D-ii: normalize fans out each hadith into per-label Parquets
+    under a folder prefix + ``_MANIFEST.json`` written LAST."""
+
+    @staticmethod
+    def _read_manifest(store: ObjectStore, prefix: str) -> dict[str, Any]:
+        body = store.get_object(f"{prefix}_MANIFEST.json")
+        result: dict[str, Any] = json.loads(body.decode("utf-8"))
+        return result
+
+    @staticmethod
+    def _read_nodes(store: ObjectStore, prefix: str, filename: str) -> list[dict[str, Any]]:
+        body = store.get_object(f"{prefix}{filename}")
+        table = pq.read_table(io.BytesIO(body))
+        rows = table.to_pylist()
+        # Decode the JSON-encoded props column for test assertions.
+        return [{**r, "props": json.loads(r["props"])} for r in rows]
+
+    def test_emits_folder_prefix_and_manifest(
         self,
         object_store: ObjectStore,
         sample_message: PipelineMessage,
@@ -267,32 +285,204 @@ class TestNormalizeProcessor:
 
         nxt = NormalizeProcessor(object_store)(sample_message)
 
-        assert nxt.b2_path == "normalized/batch-001/hadiths.parquet"
-        assert nxt.record_count == 2
-        out = pq.read_table(io.BytesIO(object_store.get_object(nxt.b2_path)))
-        assert out.schema.equals(HADITH_SCHEMA)
-        assert out.num_rows == 2
+        # b2_path is now a folder prefix with trailing slash (#192 D-ii).
+        assert nxt.b2_path == "normalized/batch-001/"
+        manifest = self._read_manifest(object_store, nxt.b2_path)
+        assert manifest["batch_id"] == "batch-001"
+        assert manifest["source"] == "sunnah-api"
+        # total_row_count across every Parquet must equal nxt.record_count.
+        assert manifest["total_row_count"] == nxt.record_count
+
+    def test_fan_out_produces_expected_per_label_counts(
+        self,
+        object_store: ObjectStore,
+        sample_message: PipelineMessage,
+        hadith_row: Any,
+    ) -> None:
+        # Two hadiths sharing one collection, one with a full English isnad.
+        rows = [
+            hadith_row(
+                source_id="h1",
+                matn_en="text one",
+                collection_name="bukhari",
+            ),
+            hadith_row(
+                source_id="h2",
+                matn_en="text two",
+                collection_name="bukhari",
+            ),
+        ]
+        rows[0]["isnad_raw_en"] = "Narrated Abu Hurayrah from Malik on the authority of Nafi"
+        rows[1]["grade"] = "sahih"
+        _seed(object_store, sample_message.b2_path, build_hadith_parquet(rows))
+
+        nxt = NormalizeProcessor(object_store)(sample_message)
+
+        manifest = self._read_manifest(object_store, nxt.b2_path)
+        entries = {e["path"]: e for e in manifest["parquets"]}
+
+        # Two hadith nodes (always).
+        assert entries["hadiths.parquet"]["row_count"] == 2
+
+        # One collection (deduped across the two hadiths).
+        assert entries["collections.parquet"]["row_count"] == 1
+
+        # Two chain nodes — one per hadith, regardless of isnad presence.
+        assert entries["chains.parquet"]["row_count"] == 2
+
+        # Narrators from the English isnad on h1. Three mentions expected
+        # (Abu Hurayrah, Malik, Nafi) — the extractor splits on the
+        # transmission keywords ``Narrated``/``from``/``on the authority of``.
+        narrators = self._read_nodes(object_store, nxt.b2_path, "narrators.parquet")
+        assert len(narrators) >= 2, f"expected multiple narrators extracted, got {narrators}"
+
+        # Grading node only for h2 (the one with a grade set).
+        gradings = self._read_nodes(object_store, nxt.b2_path, "gradings.parquet")
+        assert len(gradings) == 1
+        assert gradings[0]["props"]["grade"] == "sahih"
+
+        # Edges present for APPEARS_IN (per-hadith) + GRADED_BY (h2) +
+        # TRANSMITTED_TO (N-1 narrators in h1's chain) + NARRATED (first
+        # narrator -> h1).
+        edges_body = object_store.get_object(f"{nxt.b2_path}edges.parquet")
+        edges_table = pq.read_table(io.BytesIO(edges_body))
+        edge_labels = edges_table.column("label").to_pylist()
+        assert edge_labels.count("APPEARS_IN") == 2
+        assert edge_labels.count("GRADED_BY") == 1
+        assert "NARRATED" in edge_labels
+        assert "TRANSMITTED_TO" in edge_labels
+
+    def test_every_node_row_matches_allowed_label_vocabulary(
+        self,
+        object_store: ObjectStore,
+        sample_message: PipelineMessage,
+        sample_hadith_parquet: bytes,
+    ) -> None:
+        from workers.lib.topics import ALLOWED_NODE_LABELS
+
+        _seed(object_store, sample_message.b2_path, sample_hadith_parquet)
+        nxt = NormalizeProcessor(object_store)(sample_message)
+
+        manifest = self._read_manifest(object_store, nxt.b2_path)
+        for entry in manifest["parquets"]:
+            if entry["path"] == "edges.parquet":
+                continue
+            body = object_store.get_object(f"{nxt.b2_path}{entry['path']}")
+            table = pq.read_table(io.BytesIO(body))
+            for label in set(table.column("label").to_pylist()):
+                assert label in ALLOWED_NODE_LABELS, f"normalize emitted unknown label {label!r}"
+
+    def test_stable_narrator_ids_across_reruns(
+        self,
+        object_store: ObjectStore,
+        fake_s3: FakeS3Client,
+        sample_message: PipelineMessage,
+        hadith_row: Any,
+    ) -> None:
+        row = hadith_row(source_id="h1", matn_en="t", collection_name="bukhari")
+        row["isnad_raw_en"] = "Narrated Abu Hurayrah from Malik"
+        _seed(object_store, sample_message.b2_path, build_hadith_parquet([row]))
+
+        nxt1 = NormalizeProcessor(object_store)(sample_message)
+        ids_run1 = sorted(
+            n["id"] for n in self._read_nodes(object_store, nxt1.b2_path, "narrators.parquet")
+        )
+
+        # Wipe and re-run on identical input — every ID must match.
+        fake_s3.objects = {
+            k: v for k, v in fake_s3.objects.items() if not k[1].startswith("normalized/")
+        }
+        nxt2 = NormalizeProcessor(object_store)(sample_message)
+        ids_run2 = sorted(
+            n["id"] for n in self._read_nodes(object_store, nxt2.b2_path, "narrators.parquet")
+        )
+
+        assert ids_run1 == ids_run2
+        assert all(i.startswith("nar:") for i in ids_run1)
+
+    def test_manifest_row_counts_match_parquet_row_counts(
+        self,
+        object_store: ObjectStore,
+        sample_message: PipelineMessage,
+        sample_hadith_parquet: bytes,
+    ) -> None:
+        _seed(object_store, sample_message.b2_path, sample_hadith_parquet)
+        nxt = NormalizeProcessor(object_store)(sample_message)
+
+        manifest = self._read_manifest(object_store, nxt.b2_path)
+        for entry in manifest["parquets"]:
+            body = object_store.get_object(f"{nxt.b2_path}{entry['path']}")
+            table = pq.read_table(io.BytesIO(body))
+            assert table.num_rows == entry["row_count"], (
+                f"manifest lies about {entry['path']}: "
+                f"claims {entry['row_count']}, parquet has {table.num_rows}"
+            )
+
+    def test_no_part_files_remain_on_success(
+        self,
+        object_store: ObjectStore,
+        fake_s3: FakeS3Client,
+        sample_message: PipelineMessage,
+        sample_hadith_parquet: bytes,
+    ) -> None:
+        _seed(object_store, sample_message.b2_path, sample_hadith_parquet)
+        NormalizeProcessor(object_store)(sample_message)
+
+        leaked = [k for (_bucket, k) in fake_s3.objects if ".part." in k]
+        assert leaked == [], f"leaked .part staging files: {leaked}"
+
+    def test_write_failure_leaves_no_manifest(
+        self,
+        object_store: ObjectStore,
+        fake_s3: FakeS3Client,
+        sample_message: PipelineMessage,
+        sample_hadith_parquet: bytes,
+    ) -> None:
+        """If any per-label write fails, ingest must not see a manifest —
+        no manifest means no ready signal, ingest skips the batch."""
+        _seed(object_store, sample_message.b2_path, sample_hadith_parquet)
+
+        processor = NormalizeProcessor(object_store)
+
+        original_put = object_store.put_object
+        call_count = {"n": 0}
+
+        def flaky_put(
+            key: str, data: bytes, content_type: str = "application/octet-stream"
+        ) -> None:
+            call_count["n"] += 1
+            # Fail the 2nd .part write so at least one label lands but the
+            # batch aborts before the manifest is written.
+            if call_count["n"] == 2:
+                raise RuntimeError("simulated B2 outage")
+            original_put(key, data, content_type=content_type)
+
+        object_store.put_object = flaky_put  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="simulated B2 outage"):
+            processor(sample_message)
+
+        # Manifest must be absent.
+        leaked_manifest = [k for (_bucket, k) in fake_s3.objects if k.endswith("_MANIFEST.json")]
+        assert leaked_manifest == []
 
     def test_drops_rows_missing_required_fields(
         self,
         object_store: ObjectStore,
         sample_message: PipelineMessage,
-        hadith_row,
+        hadith_row: Any,
     ) -> None:
-        """Input arrives with a relaxed (fully-nullable) schema containing a
-        null in a target-non-nullable column; normalize must drop that row
-        before casting to the strict target schema."""
+        """Relaxed-schema input with a null in a target-non-null column must
+        be dropped before fan-out so we don't emit nodes for invalid rows."""
         good = hadith_row(source_id="good", matn_en="well-formed row")
         bad = hadith_row(source_id="bad")
-        bad["source_corpus"] = None  # null in a column that target schema marks non-null
+        bad["source_corpus"] = None
 
-        # Build a relaxed schema where every field is nullable so pa/parquet
-        # accepts the null.
         relaxed = pa.schema([pa.field(f.name, f.type, nullable=True) for f in HADITH_SCHEMA])
-        by_col: dict[str, list] = {f.name: [] for f in relaxed}
-        for row in (good, bad):
+        by_col: dict[str, list[Any]] = {f.name: [] for f in relaxed}
+        for r in (good, bad):
             for f in relaxed:
-                by_col[f.name].append(row.get(f.name))
+                by_col[f.name].append(r.get(f.name))
         table = pa.table(by_col, schema=relaxed)
         buf = io.BytesIO()
         pq.write_table(table, buf)
@@ -300,37 +490,15 @@ class TestNormalizeProcessor:
 
         nxt = NormalizeProcessor(object_store)(sample_message)
 
-        out = pq.read_table(io.BytesIO(object_store.get_object(nxt.b2_path)))
-        assert out.num_rows == 1
-        assert out.column("source_id").to_pylist() == ["good"]
-        assert nxt.record_count == 1
-
-    def test_strips_unexpected_extra_columns(
-        self,
-        object_store: ObjectStore,
-        sample_message: PipelineMessage,
-        hadith_row,
-    ) -> None:
-        row = hadith_row(source_id="x", matn_en="text")
-        cols = {f.name: [row[f.name]] for f in HADITH_SCHEMA}
-        cols["unexpected_extra"] = ["ignore-me"]
-        table = pa.table(cols)
-        buf = io.BytesIO()
-        pq.write_table(table, buf)
-        _seed(object_store, sample_message.b2_path, buf.getvalue())
-
-        nxt = NormalizeProcessor(object_store)(sample_message)
-
-        out = pq.read_table(io.BytesIO(object_store.get_object(nxt.b2_path)))
-        assert out.schema.equals(HADITH_SCHEMA)
-        assert "unexpected_extra" not in out.column_names
+        hadiths = self._read_nodes(object_store, nxt.b2_path, "hadiths.parquet")
+        assert len(hadiths) == 1
+        assert hadiths[0]["props"]["collection_name"] == "bukhari"
 
     def test_missing_required_column_raises(
         self,
         object_store: ObjectStore,
         sample_message: PipelineMessage,
     ) -> None:
-        # Build a Parquet that omits the required ``source_corpus`` column.
         table = pa.table({"source_id": ["x"], "collection_name": ["y"], "sect": ["sunni"]})
         buf = io.BytesIO()
         pq.write_table(table, buf)
@@ -382,7 +550,8 @@ def test_processor_chain_propagates_batch_id(
 
     assert after_norm.batch_id == "batch-001"
     assert after_norm.source == "sunnah-api"
-    assert after_norm.b2_path == "normalized/batch-001/hadiths.parquet"
+    # Post-#192 D-ii: normalize emits a folder prefix, not a single object key.
+    assert after_norm.b2_path == "normalized/batch-001/"
 
 
 def test_dedup_failure_propagates_to_dlq_via_runner(
