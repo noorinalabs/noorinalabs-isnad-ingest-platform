@@ -11,6 +11,7 @@ from workers.ingest.processor import IngestProcessor
 from workers.lib.log import configure_logging, get_logger
 from workers.lib.object_store import ObjectStore
 from workers.lib.runner import WorkerRunner, WorkerSettings
+from workers.lib.topics import PIPELINE_NORMALIZE_DONE
 
 if TYPE_CHECKING:
     from neo4j import Driver
@@ -31,7 +32,7 @@ def build_runner() -> tuple[WorkerRunner, Driver]:
 
     settings = WorkerSettings(
         worker_name="ingest-worker",
-        consume_topic="pipeline.norm.done",
+        consume_topic=PIPELINE_NORMALIZE_DONE,
         produce_topic=None,  # terminal stage
         consumer_group="ingest-worker",
     )
