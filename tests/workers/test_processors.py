@@ -518,9 +518,50 @@ def test_ingest_returns_none_and_reads_input(
     sample_message: PipelineMessage,
     sample_hadith_parquet: bytes,
 ) -> None:
-    _seed(object_store, sample_message.b2_path, sample_hadith_parquet)
+    """Terminal ingest stage returns None on an empty D-ii batch.
 
-    result = IngestProcessor(object_store)(sample_message)
+    Under #192 D-ii the ingest input is a folder prefix carrying
+    ``_MANIFEST.json``; we write an empty manifest and assert the
+    terminal contract (returns None, no exception).
+    """
+    import json
+
+    prefix = "normalized/batch-001/"
+    folder_msg = sample_message.to_next_stage(b2_path=prefix, record_count=0)
+    object_store.put_object(
+        f"{prefix}_MANIFEST.json",
+        json.dumps(
+            {
+                "batch_id": folder_msg.batch_id,
+                "source": folder_msg.source,
+                "created_at": "2026-04-21T00:00:00+00:00",
+                "parquets": [{"path": "edges.parquet", "row_count": 0}],
+                "total_row_count": 0,
+            }
+        ).encode("utf-8"),
+    )
+    # normalize always writes edges.parquet (possibly empty)
+    import io as _io
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    empty_edges = pa.schema(
+        [
+            pa.field("label", pa.string(), nullable=False),
+            pa.field("id", pa.string(), nullable=False),
+            pa.field("props", pa.string(), nullable=False),
+            pa.field("src_id", pa.string(), nullable=False),
+            pa.field("src_label", pa.string(), nullable=False),
+            pa.field("dst_id", pa.string(), nullable=False),
+            pa.field("dst_label", pa.string(), nullable=False),
+        ]
+    ).empty_table()
+    buf = _io.BytesIO()
+    pq.write_table(empty_edges, buf)
+    object_store.put_object(f"{prefix}edges.parquet", buf.getvalue())
+
+    result = IngestProcessor(object_store)(folder_msg)
 
     assert result is None  # terminal stage
 
