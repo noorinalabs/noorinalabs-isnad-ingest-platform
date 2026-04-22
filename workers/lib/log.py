@@ -64,4 +64,5 @@ def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     """Fetch a bound logger. Auto-configures on first call."""
     if not _configured:
         configure_logging()
-    return structlog.get_logger(name)
+    logger: structlog.stdlib.BoundLogger = structlog.get_logger(name)
+    return logger
