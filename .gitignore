@@ -60,3 +60,5 @@ faiss_index/
 # Logs
 *.log
 logs/
+
+.claude/.librarian-consulted/
