@@ -17,9 +17,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-# TODO: add kafka-python and boto3 to pyproject.toml so uv sync installs them here.
-RUN uv sync --frozen --no-dev \
- && uv pip install --system kafka-python boto3
+RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt -o /tmp/requirements.txt \
+ && uv pip install --system --require-hashes -r /tmp/requirements.txt \
+ && rm /tmp/requirements.txt
 
 COPY src ./src
 COPY workers ./workers
