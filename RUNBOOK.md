@@ -35,7 +35,16 @@ relevant.
 | `dedup-worker` | `pipeline.raw.landed` | `pipeline.dedup.done` | `dedup/{source}/{batch-id}/` | B2/MinIO |
 | `enrich-worker` | `pipeline.dedup.done` | `pipeline.enrich.done` | `enriched/{source}/{batch-id}/` | B2/MinIO |
 | `normalize-worker` | `pipeline.enrich.done` | `pipeline.normalize.done` | `normalized/{batch-id}/` | B2/MinIO |
-| `ingest-worker` | `pipeline.normalize.done` | (terminal) | `staged/{batch-id}/` | Neo4j |
+| `ingest-worker` | `pipeline.normalize.done` | (terminal) | `staged/{batch-id}/` (reserved; not yet emitted) | Neo4j |
+
+The shape evolves from `raw/{source}/{YYYY-MM-DD}/` (written by the
+acquire stage in `noorinalabs-data-acquisition`) into per-batch
+prefixes once a batch is bound: dedup/enrich keep `{source}/`
+because cross-source dedup is per-source; normalize/staged drop
+`{source}/` because the manifest already groups by `batch_id` (see
+`workers/lib/object_store.py` docstring for the canonical layout
+and `ontology/repos/isnad-ingest-platform.yaml` for the design
+intent).
 
 All four workers share `pipeline.dlq` as the dead-letter sink. The
 runner (`workers/lib/runner.py`) catches every uncaught exception in
@@ -99,7 +108,11 @@ docker run --rm --network host \
   minio/mc mb local/noorinalabs-pipeline
 ```
 
-Or via the MinIO console at `http://localhost:9001`.
+`--network host` is Linux-only. On macOS / Windows Docker Desktop,
+either join the deploy compose network explicitly
+(`--network noorinalabs-deploy_default` or whichever name `docker
+network ls` shows) or use the MinIO console at
+`http://localhost:9001`.
 
 ### Create Kafka topics
 
@@ -133,6 +146,8 @@ From this repo:
 ```bash
 export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 export PIPELINE_BUCKET=noorinalabs-pipeline
+# Inside the worker container the deploy compose puts MinIO on host `minio`;
+# from the host shell (running tools outside Docker) use `localhost` instead.
 export S3_ENDPOINT_URL=http://minio:9000
 export AWS_ACCESS_KEY_ID=minio
 export AWS_SECRET_ACCESS_KEY=minio12345
@@ -270,10 +285,34 @@ docker compose pull dedup-worker:prod-<previous-short>
 docker compose up -d dedup-worker
 ```
 
-Rolling back one worker is safe — Kafka offsets are committed only on
-successful processing, so the previous version picks up exactly where
-the bad version stopped (or from the last good offset before the bad
-version started DLQ-ing).
+**Rollback semantics caveat (carry-forward).** All four workers
+construct `KafkaConsumer(enable_auto_commit=False)` (see
+`workers/<name>/main.py`) but `WorkerRunner.run_forever`
+(`workers/lib/runner.py`) does **not** call `consumer.commit()`
+anywhere. In practice this means:
+
+- The consumer's *committed* offset on the broker stays at whatever
+  the group last had before this process started; resumption replays
+  every message since then.
+- Idempotency is what actually keeps replay safe — the in-memory
+  checkpoint (`InMemoryCheckpoint` in `runner.py`) skips any
+  `batch_id` it has already seen *within the current process*. On
+  restart the in-memory checkpoint is empty, so the worker re-runs
+  every batch in the resumption window.
+- For dedup / enrich / normalize the per-batch ops are idempotent on
+  the object store (each batch writes its own keyed Parquet) and
+  Kafka publish is also idempotent at the message-key level, so
+  replay is correct, just wasteful.
+- For ingest the Neo4j MERGE is idempotent at the node/edge-id
+  level, so replay is also correct.
+
+A clean image rollback is therefore **safe** but not "graceful
+resumption from the last good offset" — it is "replay from the broker
+group's committed offset, and rely on idempotency to no-op already-
+processed batches". Manual offset-commit-on-success and a durable
+checkpoint store are tracked under the existing
+`workers/lib/runner.py::InMemoryCheckpoint` TODO and listed in
+[Known gaps and carry-forwards](#known-gaps-and-carry-forwards).
 
 ### Topic rollback (rare, surgical)
 
@@ -494,6 +533,17 @@ this scaffold runbook and are tracked separately:
 - Durable idempotency checkpoint store
   (`workers/lib/runner.py::InMemoryCheckpoint` is dev-only — TODO in
   source).
+- Manual offset-commit-on-success in `WorkerRunner` — couples with
+  the durable checkpoint above. Currently the runner relies on
+  idempotency (in-memory checkpoint + idempotent downstream writes)
+  rather than committed offsets, which makes "replay window after
+  restart" larger than necessary.
+- Ingest worker writing the `staged/{batch-id}/` prefix — currently
+  reserved in `ontology/repos/isnad-ingest-platform.yaml` and
+  upstream design (#192 D-ii), but `workers/ingest/processor.py`
+  only MERGEs to Neo4j and returns `None`. Reconciliation between
+  ontology-yaml and processor.py implementation is its own
+  ontology-rebuild ticket.
 - DLQ paging thresholds and Prometheus alert rules.
 - Neo4j connectivity probe in the deploy db-migrate-gate analog.
 
