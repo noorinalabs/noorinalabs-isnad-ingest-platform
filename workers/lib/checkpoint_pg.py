@@ -50,8 +50,8 @@ class PgCheckpoint:
 
     A TTL sweep is intentionally out of scope — at the expected rate
     (~10k batches/day × 7-day Kafka retention ≈ 70k rows) the index
-    stays trivially small. See follow-up issue (filed post-#11) for
-    the explicit TTL job when scale warrants it.
+    stays trivially small. See #42 for the explicit TTL job when
+    scale warrants it.
     """
 
     def __init__(self, *, conn: _PgConnection, stage: str) -> None:
