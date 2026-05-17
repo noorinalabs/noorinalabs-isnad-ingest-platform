@@ -306,3 +306,51 @@ def test_paginated_s3_deletion(bucket_name: str, tmp_path: Path) -> None:
 
     assert report.s3_objects_deleted == 3
     assert store._client.objects == {}
+
+
+class TestResetScopeDescribe:
+    """``ResetScope.describe()`` is the resolved-plan helper shared by the
+    dry-run path and the post-execution report. Operators rely on it to
+    sanity-check intent before re-running without ``--dry-run``, so every
+    prefix / topic / table / label that the resetter will actually touch
+    MUST appear by literal string match. See issue #15."""
+
+    def test_stage_describes_prefix_topic_and_consumer_group(self) -> None:
+        out = ResetScope.stage_scope("dedup").describe()
+
+        assert STAGE_PREFIXES["dedup"] in out
+        assert STAGE_TOPICS["dedup"] in out
+        assert "dedup-worker" in out  # default consumer group
+
+    def test_stage_describes_custom_consumer_group(self) -> None:
+        out = ResetScope.stage_scope("enriched", consumer_group="custom-group").describe()
+
+        assert "custom-group" in out
+        assert "enriched-worker" not in out
+
+    def test_source_describes_every_stage_prefix(self) -> None:
+        out = ResetScope.source_scope("sunnah-api").describe()
+
+        for stage_prefix in STAGE_PREFIXES.values():
+            assert f"{stage_prefix}sunnah-api/" in out, (
+                f"source describe missing {stage_prefix}sunnah-api/"
+            )
+
+    def test_full_describes_every_prefix_topic_label_and_table(self) -> None:
+        from src.pipeline.reset_adapters import HADITH_METADATA_TABLES, HADITH_NODE_LABELS
+
+        out = ResetScope.full_scope().describe()
+
+        for prefix in STAGE_PREFIXES.values():
+            assert prefix in out, f"full describe missing B2 prefix {prefix}"
+        for topic in ALL_PIPELINE_TOPICS:
+            assert topic in out, f"full describe missing Kafka topic {topic}"
+        for label in HADITH_NODE_LABELS:
+            assert label in out, f"full describe missing Neo4j label {label}"
+        for table in HADITH_METADATA_TABLES:
+            assert table in out, f"full describe missing PG table {table}"
+
+    def test_full_describe_announces_user_data_preserved(self) -> None:
+        out = ResetScope.full_scope().describe()
+
+        assert "PRESERVED" in out
