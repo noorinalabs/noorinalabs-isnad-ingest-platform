@@ -55,8 +55,7 @@ remove a ``sect_affiliation`` that a later source disavowed — emitting
 ``{"grade": null}`` is a no-op against the live node. This is the
 intended Phase-4 default (scholar curation must survive ingest churn);
 field-clearing, if needed, will arrive on a separate corrections path
-rather than through this allow-list. See #23 and the #192 design
-thread.
+rather than through this allow-list. See #23.
 """
 
 from __future__ import annotations
