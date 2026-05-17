@@ -274,6 +274,18 @@ def _build_node_cypher(label: str) -> str:
     curated ``text_ar`` on a hadith survives an ingest batch that only
     carries ``text_en``. This is the core of Farhan's Phase-4 fix
     (#192 comment thread).
+
+    Coalesce-clear contract (per-field, applies to every SET line)
+    --------------------------------------------------------------
+    - field omitted from ``row.props``  → preserve existing value
+    - field present with explicit null  → preserve existing value (silent no-op)
+    - field present with a new value    → overwrite
+
+    The explicit-null branch is asymmetric on purpose: ingest batches
+    cannot clear node properties. A correction that needs to null a
+    field must reach Neo4j through a separate path (issue #23 / future
+    corrections topic). The same contract applies to
+    ``_build_edge_cypher``.
     """
     fields = NODE_PROPERTY_MAP.get(label, [])
     set_lines = ",\n    ".join(f"n.{f} = coalesce(row.props.{f}, n.{f})" for f in fields)
@@ -287,7 +299,16 @@ def _build_node_cypher(label: str) -> str:
 
 
 def _build_edge_cypher(label: str) -> str:
-    """Per-edge-label MERGE Cypher with enumerated, null-safe SET stanzas."""
+    """Per-edge-label MERGE Cypher with enumerated, null-safe SET stanzas.
+
+    Same coalesce-clear contract as ``_build_node_cypher``:
+
+    - field omitted from ``row.props``  → preserve existing value
+    - field present with explicit null  → preserve existing value (silent no-op)
+    - field present with a new value    → overwrite
+
+    Edge properties cannot be cleared via an ingest batch (see #23).
+    """
     fields = EDGE_PROPERTY_MAP.get(label, [])
     set_lines = ",\n    ".join(f"r.{f} = coalesce(row.props.{f}, r.{f})" for f in fields)
     set_clause = f"SET {set_lines}\n" if fields else ""
