@@ -417,19 +417,12 @@ def _cmd_reset(
 
     if stage:
         scope = ResetScope.stage_scope(stage)
-        summary_line = f"STAGE reset: prefix '{stage}/' and consumer offsets"
     elif source:
         scope = ResetScope.source_scope(source)
-        summary_line = f"SOURCE reset: all stage prefixes for source '{source}'"
     else:
         scope = ResetScope.full_scope()
-        summary_line = (
-            "FULL reset: every pipeline B2 prefix, every pipeline Kafka topic, "
-            "Neo4j hadith graph, PG hadith metadata. "
-            "Users/roles/sessions are PRESERVED."
-        )
 
-    print(f"=== Pipeline Reset ===\n  {summary_line}\n")
+    print(f"=== Pipeline Reset ===\n{scope.describe()}\n")
 
     if scope.level == "full" and not assume_yes:
         confirm = input("Type 'OBLITERATE' to proceed: ").strip()

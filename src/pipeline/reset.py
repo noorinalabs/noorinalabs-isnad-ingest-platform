@@ -135,6 +135,54 @@ class ResetScope:
     def full_scope(cls) -> ResetScope:
         return cls(level="full")
 
+    def describe(self, *, indent: str = "  ") -> str:
+        """Render the resolved scope as a multi-line plan.
+
+        Single source of truth shared by the dry-run path and the
+        post-execution report header so operators see the exact same
+        prefixes / topics / tables / labels in both places. Pulls from
+        the same module-level constants the resetter and adapters use,
+        so the plan can never diverge from what gets executed.
+        """
+        from src.pipeline.reset_adapters import HADITH_METADATA_TABLES, HADITH_NODE_LABELS
+
+        if self.level == "stage":
+            assert self.stage is not None
+            prefix = STAGE_PREFIXES[self.stage]
+            topic = STAGE_TOPICS.get(self.stage, "(none — no Kafka topic for this stage)")
+            return (
+                f"STAGE reset — '{self.stage}':\n"
+                f"{indent}B2 prefix      : {prefix}\n"
+                f"{indent}Kafka topic    : {topic}\n"
+                f"{indent}Consumer group : {self.consumer_group}"
+            )
+
+        if self.level == "source":
+            assert self.source is not None
+            source_prefixes = [f"{p}{self.source}/" for p in STAGE_PREFIXES.values()]
+            lines = [f"SOURCE reset — '{self.source}':", f"{indent}B2 prefixes to wipe:"]
+            lines.extend(f"{indent}  - {sp}" for sp in source_prefixes)
+            return "\n".join(lines)
+
+        if self.level == "full":
+            lines = [
+                "FULL reset — every pipeline B2 prefix, every pipeline Kafka topic,",
+                f"{indent}Neo4j hadith graph, PG hadith metadata.",
+                f"{indent}Users/roles/sessions are PRESERVED.",
+                "",
+                f"{indent}B2 prefixes:",
+            ]
+            lines.extend(f"{indent}  - {p}" for p in STAGE_PREFIXES.values())
+            lines.append(f"{indent}Kafka topics:")
+            lines.extend(f"{indent}  - {t}" for t in ALL_PIPELINE_TOPICS)
+            lines.append(f"{indent}Neo4j node labels (HADITH_NODE_LABELS):")
+            lines.extend(f"{indent}  - {label}" for label in HADITH_NODE_LABELS)
+            lines.append(f"{indent}PG tables (HADITH_METADATA_TABLES):")
+            lines.extend(f"{indent}  - {table}" for table in HADITH_METADATA_TABLES)
+            return "\n".join(lines)
+
+        raise ValueError(f"unknown reset level: {self.level!r}")
+
 
 @dataclass
 class ResetReport:
