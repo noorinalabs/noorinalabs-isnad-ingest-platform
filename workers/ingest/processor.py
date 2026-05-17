@@ -393,7 +393,11 @@ class IngestProcessor:
             ``SessionExpired``) internally, bounded by
             ``max_transaction_retry_time`` (default 30s); when the wall-
             clock budget is exhausted the last error propagates and the
-            runner DLQs the message.
+            runner DLQs the message. Each retry iteration releases the
+            connection back to the pool and reacquires a fresh one (see
+            ``neo4j._sync.work.session._run_transaction`` lines 557 / 532),
+            so a ``SessionExpired`` triggers a fresh-connection retry
+            which on a cluster can land on a different cluster member.
             """
             merged_nodes: dict[str, int] = {}
             for node_label, label_rows in nodes_by_label.items():

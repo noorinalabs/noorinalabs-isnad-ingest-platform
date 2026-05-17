@@ -2,7 +2,7 @@
 
 The tests mock the neo4j driver/session so the suite runs without
 Docker or a live database. Integration coverage against a real Neo4j
-(testcontainers) is tracked separately in issue #136.
+(testcontainers) is tracked separately in issue #38.
 """
 
 from __future__ import annotations
@@ -556,7 +556,7 @@ def test_ingest_session_expired_propagates_to_dlq(
     by raising directly from ``execute_write``; this asserts the *wire
     contract* (one session opened, exception propagates) but does NOT
     exercise the driver's wall-clock bound. That requires a real Neo4j
-    (testcontainers, issue #136 integration suite).
+    (testcontainers, issue #38 integration suite).
     """
     from neo4j.exceptions import SessionExpired
 
