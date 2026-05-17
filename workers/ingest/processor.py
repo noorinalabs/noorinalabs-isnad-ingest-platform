@@ -28,9 +28,21 @@ Design (issue #18, #192 D-ii)
       runner DLQs it.
     * ``UnknownSchemaError`` — manifest references an unknown label or
       an unknown edge type; runner DLQs.
-    * ``ServiceUnavailable`` — neo4j driver retries internally.
-    * ``SessionExpired`` — reopen session once and retry.
+    * Transient driver errors (``ServiceUnavailable``, ``TransientError``,
+      ``SessionExpired``) — the neo4j driver retries them internally
+      inside ``session.execute_write``, bounded by the driver-config
+      ``max_transaction_retry_time`` (default 30s). Once that wall-clock
+      bound is exhausted the last error propagates and the runner DLQs
+      it. Per-message Neo4j retry time is therefore capped at ~30s.
     * ``ClientError`` and everything else — propagate for DLQ.
+
+Issue #20 removed a redundant outer ``SessionExpired`` reopen that
+compounded with the driver-internal retry; ``SessionExpired.is_retryable()``
+returns True (verified in ``neo4j.exceptions`` and the ``_run_transaction``
+retry loop in ``neo4j._sync.work.session``), so the driver already
+retries the same call internally — re-running the batch on a fresh
+session doubled the worst-case retry budget without adding fault
+tolerance.
 """
 
 from __future__ import annotations
@@ -370,15 +382,18 @@ class IngestProcessor:
             )
             return None
 
-        from neo4j.exceptions import SessionExpired
-
         def _run_batch(tx: ManagedTransaction) -> dict[str, dict[str, int]]:
             """Single-transaction closure — all nodes first, then edges.
 
             Running both phases inside one ``execute_write`` means the
             driver's retry covers the whole batch, and edges always see
             their endpoints MATCH-able because the MERGE of nodes ran in
-            the same transaction scope.
+            the same transaction scope. The driver retries all transient
+            errors (``ServiceUnavailable``, ``TransientError``,
+            ``SessionExpired``) internally, bounded by
+            ``max_transaction_retry_time`` (default 30s); when the wall-
+            clock budget is exhausted the last error propagates and the
+            runner DLQs the message.
             """
             merged_nodes: dict[str, int] = {}
             for node_label, label_rows in nodes_by_label.items():
@@ -388,17 +403,8 @@ class IngestProcessor:
                 merged_edges[edge_label] = _merge_edges_tx(tx, label=edge_label, rows=edge_rows)
             return {"nodes": merged_nodes, "edges": merged_edges}
 
-        def _run(session: Any) -> dict[str, dict[str, int]]:
-            result: dict[str, dict[str, int]] = session.execute_write(_run_batch)
-            return result
-
-        try:
-            with self.neo4j_driver.session() as session:
-                merged = _run(session)
-        except SessionExpired:
-            _logger.warning("ingest_session_expired_retrying", batch_id=msg.batch_id)
-            with self.neo4j_driver.session() as session:
-                merged = _run(session)
+        with self.neo4j_driver.session() as session:
+            merged: dict[str, dict[str, int]] = session.execute_write(_run_batch)
 
         _logger.info(
             "ingest_merged",

@@ -534,9 +534,30 @@ def test_ingest_drops_properties_outside_allowlist(
 # ---------------------------------------------------------------------------
 
 
-def test_ingest_retries_once_on_session_expired(
+def test_ingest_session_expired_propagates_to_dlq(
     object_store: ObjectStore, folder_prefix_message: PipelineMessage
 ) -> None:
+    """Issue #20: outer ``SessionExpired`` reopen was redundant.
+
+    The neo4j driver classifies ``SessionExpired`` as retryable
+    (``SessionExpired.is_retryable() -> True`` in ``neo4j.exceptions``)
+    and retries it inside ``session.execute_write``'s loop in
+    ``neo4j._sync.work.session._run_transaction``, bounded by
+    ``max_transaction_retry_time`` (default 30s). The processor's outer
+    try/except reopen ran the entire batch a *second* time on a fresh
+    session, doubling the per-message worst-case retry budget without
+    adding any fault tolerance the driver did not already provide.
+
+    With the outer reopen removed, a ``SessionExpired`` that surfaces
+    from ``execute_write`` means the driver's wall-clock retry budget
+    was exhausted — propagate so the runner DLQs.
+
+    *Test scope:* the ``_FakeSession`` here bypasses the real retry loop
+    by raising directly from ``execute_write``; this asserts the *wire
+    contract* (one session opened, exception propagates) but does NOT
+    exercise the driver's wall-clock bound. That requires a real Neo4j
+    (testcontainers, issue #136 integration suite).
+    """
     from neo4j.exceptions import SessionExpired
 
     _write_batch(
@@ -544,15 +565,52 @@ def test_ingest_retries_once_on_session_expired(
         folder_prefix_message.b2_path,
         nodes={"Narrator": [{"id": "nar:a", "props": {"name_en": "A"}}]},
     )
-    first = _FakeSession([], raise_on_execute=SessionExpired("token expired"))
-    second = _FakeSession([])
-    driver = _FakeDriver(session_factories=[first, second])
+    sess = _FakeSession([], raise_on_execute=SessionExpired("driver retry budget exhausted"))
+    driver = _FakeDriver(session_factories=[sess])
 
-    IngestProcessor(object_store, neo4j_driver=driver)(folder_prefix_message)
+    with pytest.raises(SessionExpired):
+        IngestProcessor(object_store, neo4j_driver=driver)(folder_prefix_message)
 
-    # Reopened — the successful second session ran the full batch
-    assert driver._next_factory == 2
-    assert len(driver.sink) == 1  # one tx.run for the single Narrator label
+    # Exactly one session opened — no outer reopen
+    assert driver._next_factory == 1
+    assert driver.sink == []  # error fired before any tx.run captured
+
+
+def test_runner_routes_session_expired_to_dlq(
+    object_store: ObjectStore, folder_prefix_message: PipelineMessage
+) -> None:
+    """Issue #20: post-driver-bound SessionExpired routes to DLQ via runner."""
+    from neo4j.exceptions import SessionExpired
+
+    _write_batch(
+        object_store,
+        folder_prefix_message.b2_path,
+        nodes={"Narrator": [{"id": "nar:a", "props": {"name_en": "A"}}]},
+    )
+    sess = _FakeSession([], raise_on_execute=SessionExpired("driver retry budget exhausted"))
+    driver = _FakeDriver(session_factories=[sess])
+    producer = FakeProducer()
+
+    runner = WorkerRunner(
+        settings=WorkerSettings(
+            worker_name="ingest-worker",
+            consume_topic=PIPELINE_NORMALIZE_DONE,
+            produce_topic=None,
+            consumer_group="ingest-worker",
+        ),
+        consumer=FakeConsumer([]),
+        producer=producer,
+        process=IngestProcessor(object_store, neo4j_driver=driver),
+    )
+    runner.handle_one(serialize_message(folder_prefix_message))
+
+    assert len(producer.sent) == 1
+    topic, value = producer.sent[0]
+    assert topic == DLQ_TOPIC
+    record = json.loads(value)
+    assert record["error_class"] == "SessionExpired"
+    # Single session opened — no outer reopen
+    assert driver._next_factory == 1
 
 
 def test_ingest_client_error_propagates_for_dlq(
