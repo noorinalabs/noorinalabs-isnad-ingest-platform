@@ -8,6 +8,7 @@ from types import FrameType
 from typing import TYPE_CHECKING
 
 from workers.ingest.processor import IngestProcessor
+from workers.lib.checkpoint_factory import build_checkpoint
 from workers.lib.log import configure_logging, get_logger
 from workers.lib.object_store import ObjectStore
 from workers.lib.runner import WorkerRunner, WorkerSettings
@@ -54,6 +55,7 @@ def build_runner() -> tuple[WorkerRunner, Driver]:
         consumer=consumer,
         producer=producer,
         process=IngestProcessor(store, neo4j_driver=driver),
+        checkpoint=build_checkpoint(settings.worker_name),
     )
     return runner, driver
 
