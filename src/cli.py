@@ -445,10 +445,10 @@ def _cmd_reset(
     object_store, kafka_admin, neo4j, pg = _build_reset_clients(settings)
 
     resetter = PipelineResetter(
-        object_store=object_store,
-        kafka_admin=kafka_admin,
-        neo4j=neo4j,
-        pg=pg,
+        object_store=object_store,  # type: ignore[arg-type]
+        kafka_admin=kafka_admin,  # type: ignore[arg-type]
+        neo4j=neo4j,  # type: ignore[arg-type]
+        pg=pg,  # type: ignore[arg-type]
         data_dir=Path(settings.data_raw_dir).parent,
     )
     report, _entry, audit_path = resetter.reset(scope)
