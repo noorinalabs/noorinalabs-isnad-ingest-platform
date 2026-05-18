@@ -8,14 +8,29 @@ from __future__ import annotations
 
 import getpass
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-__all__ = ["AuditEntry", "list_recent_entries", "write_audit_entry"]
+__all__ = ["AuditEntry", "create_audit_entry", "list_recent_entries", "write_audit_entry"]
 
 AUDIT_DIR_NAME = "audit"
+
+# Env vars worth capturing alongside ``getpass.getuser()`` so SIEM can
+# attribute actions to a human even when running as root, a service
+# account, or inside a container. Only set keys whose env var is present
+# (never empty placeholders) — see issue #16 bonus item.
+_CALLER_HINT_ENV_VARS: tuple[str, ...] = (
+    "SUDO_USER",
+    "GITHUB_ACTOR",
+    "KUBERNETES_SERVICE_ACCOUNT",
+)
+
+
+def _collect_caller_hints() -> dict[str, str]:
+    return {var: os.environ[var] for var in _CALLER_HINT_ENV_VARS if os.environ.get(var)}
 
 
 @dataclass(frozen=True)
@@ -55,7 +70,19 @@ def create_audit_entry(
     rows_affected: int = 0,
     summary: dict[str, Any] | None = None,
 ) -> AuditEntry:
-    """Build an AuditEntry with auto-populated timestamp and operator."""
+    """Build an AuditEntry with auto-populated timestamp and operator.
+
+    Env-derived caller hints (``SUDO_USER``, ``GITHUB_ACTOR``,
+    ``KUBERNETES_SERVICE_ACCOUNT``) are merged into ``summary["caller_hints"]``
+    when present, so SIEM can attribute actions to a human on shared boxes,
+    container runtimes, or CI runners where ``getpass.getuser()`` returns
+    ``root`` or a service account.
+    """
+    merged_summary: dict[str, Any] = dict(summary or {})
+    hints = _collect_caller_hints()
+    if hints:
+        merged_summary["caller_hints"] = hints
+
     return AuditEntry(
         stage=stage,
         timestamp=datetime.now(tz=UTC).isoformat(),
@@ -63,7 +90,7 @@ def create_audit_entry(
         operator=getpass.getuser(),
         files_changed=files_changed or [],
         rows_affected=rows_affected,
-        summary=summary or {},
+        summary=merged_summary,
     )
 
 

@@ -30,6 +30,7 @@ from typing import Any, Protocol
 from src.pipeline.audit import AuditEntry, create_audit_entry, write_audit_entry
 
 __all__ = [
+    "CONFIRMATION_METHODS",
     "KafkaAdmin",
     "Neo4jResetter",
     "PgResetter",
@@ -38,6 +39,7 @@ __all__ = [
     "ResetScope",
     "StageName",
     "S3Prefix",
+    "write_dry_run_audit",
 ]
 
 # Canonical stage → B2 prefix mapping. Matches issue #105 layout.
@@ -195,6 +197,10 @@ class ResetReport:
     neo4j_rows_deleted: int = 0
     pg_rows_deleted: int = 0
     duration_seconds: float = 0.0
+    dry_run: bool = False
+    confirmation_method: str = "not-required"
+    scope_stage: str | None = None
+    scope_source: str | None = None
 
     def to_summary(self) -> dict[str, Any]:
         return {
@@ -204,7 +210,15 @@ class ResetReport:
             "kafka_topics_reset": self.kafka_topics_reset,
             "neo4j_rows_deleted": self.neo4j_rows_deleted,
             "pg_rows_deleted": self.pg_rows_deleted,
+            "dry_run": self.dry_run,
+            "confirmation_method": self.confirmation_method,
+            "scope_stage": self.scope_stage,
+            "scope_source": self.scope_source,
         }
+
+
+# Allowed values for ``confirmation_method`` — keep in sync with CLI flag mapping.
+CONFIRMATION_METHODS: frozenset[str] = frozenset({"interactive", "yes-flag", "not-required"})
 
 
 class PipelineResetter:
@@ -229,12 +243,23 @@ class PipelineResetter:
         self.pg = pg
         self.data_dir = data_dir
 
-    def reset(self, scope: ResetScope) -> tuple[ResetReport, AuditEntry, Path]:
+    def reset(
+        self,
+        scope: ResetScope,
+        *,
+        confirmation_method: str = "not-required",
+    ) -> tuple[ResetReport, AuditEntry, Path]:
         """Execute a reset and persist an audit entry.
+
+        ``confirmation_method`` records how the operator authorized the run
+        (``"interactive"``, ``"yes-flag"``, or ``"not-required"``) so SIEM
+        can distinguish runbook automation from a typed OBLITERATE confirm.
 
         Returns the report, the audit entry, and the path where the
         audit entry was written.
         """
+        _validate_confirmation_method(confirmation_method)
+
         start = time.monotonic()
 
         if scope.level == "stage":
@@ -247,6 +272,9 @@ class PipelineResetter:
             raise ValueError(f"unknown reset level: {scope.level!r}")
 
         report.duration_seconds = round(time.monotonic() - start, 3)
+        report.confirmation_method = confirmation_method
+        report.scope_stage = scope.stage
+        report.scope_source = scope.source
 
         entry = create_audit_entry(
             stage=f"reset-{scope.level}",
@@ -315,6 +343,47 @@ class PipelineResetter:
             kafka_topics_reset=topics_reset,
             neo4j_rows_deleted=neo4j_rows,
             pg_rows_deleted=pg_rows,
+        )
+
+
+def write_dry_run_audit(
+    scope: ResetScope,
+    *,
+    confirmation_method: str,
+    data_dir: Path,
+) -> tuple[ResetReport, AuditEntry, Path]:
+    """Record a dry-run as an audit entry without performing any work.
+
+    Issue #16: dry-runs are operationally meaningful ("operator practiced
+    first"), and should appear in SIEM alongside real runs with
+    ``dry_run=True`` and zeroed deletion counters. Kept module-level
+    (rather than on ``PipelineResetter``) so the CLI dry-run path doesn't
+    have to construct the four heavyweight reset adapters.
+    """
+    _validate_confirmation_method(confirmation_method)
+
+    report = ResetReport(
+        level=scope.level,
+        dry_run=True,
+        confirmation_method=confirmation_method,
+        scope_stage=scope.stage,
+        scope_source=scope.source,
+    )
+    entry = create_audit_entry(
+        stage=f"reset-{scope.level}",
+        duration_seconds=0.0,
+        rows_affected=0,
+        summary=report.to_summary(),
+    )
+    path = write_audit_entry(data_dir, entry)
+    return report, entry, path
+
+
+def _validate_confirmation_method(method: str) -> None:
+    if method not in CONFIRMATION_METHODS:
+        raise ValueError(
+            f"invalid confirmation_method: {method!r}. "
+            f"Expected one of {sorted(CONFIRMATION_METHODS)}"
         )
 
 

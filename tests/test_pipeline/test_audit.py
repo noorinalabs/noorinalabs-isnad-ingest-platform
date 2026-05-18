@@ -92,3 +92,78 @@ class TestWriteAndRead:
         assert len(e.files_changed) == 1
         assert e.files_changed[0]["md5_before"] == "aaa"
         assert e.summary["incremental"] is True
+
+
+class TestCallerHints:
+    """Issue #16 bonus: SIEM needs to attribute audit entries to a human
+    even when ``getpass.getuser()`` returns ``root`` (sudo), a service
+    account (k8s), or a CI bot account (GitHub Actions). Env-derived
+    hints are collected into ``summary["caller_hints"]``."""
+
+    _ALL_HINT_VARS = ("SUDO_USER", "GITHUB_ACTOR", "KUBERNETES_SERVICE_ACCOUNT")
+
+    def _clear_hint_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in self._ALL_HINT_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+    def test_no_hints_when_env_vars_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_hint_env(monkeypatch)
+
+        entry = create_audit_entry("sync", duration_seconds=1.0)
+
+        assert "caller_hints" not in entry.summary
+
+    def test_sudo_user_recorded_when_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_hint_env(monkeypatch)
+        monkeypatch.setenv("SUDO_USER", "alice")
+
+        entry = create_audit_entry("sync", duration_seconds=1.0)
+
+        assert entry.summary["caller_hints"] == {"SUDO_USER": "alice"}
+
+    def test_github_actor_and_k8s_sa_both_recorded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_hint_env(monkeypatch)
+        monkeypatch.setenv("GITHUB_ACTOR", "bob-bot")
+        monkeypatch.setenv("KUBERNETES_SERVICE_ACCOUNT", "audit-runner")
+
+        entry = create_audit_entry("reset-full", duration_seconds=1.0)
+
+        assert entry.summary["caller_hints"] == {
+            "GITHUB_ACTOR": "bob-bot",
+            "KUBERNETES_SERVICE_ACCOUNT": "audit-runner",
+        }
+
+    def test_empty_env_var_value_treated_as_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_hint_env(monkeypatch)
+        monkeypatch.setenv("SUDO_USER", "")
+
+        entry = create_audit_entry("sync", duration_seconds=1.0)
+
+        assert "caller_hints" not in entry.summary
+
+    def test_caller_hints_merge_with_existing_summary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_hint_env(monkeypatch)
+        monkeypatch.setenv("SUDO_USER", "alice")
+
+        entry = create_audit_entry(
+            "reset-full",
+            duration_seconds=1.0,
+            summary={"level": "full", "s3_objects_deleted": 0},
+        )
+
+        assert entry.summary["level"] == "full"
+        assert entry.summary["s3_objects_deleted"] == 0
+        assert entry.summary["caller_hints"] == {"SUDO_USER": "alice"}
+
+    def test_caller_hints_does_not_mutate_input_summary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_hint_env(monkeypatch)
+        monkeypatch.setenv("SUDO_USER", "alice")
+        input_summary: dict[str, object] = {"level": "stage"}
+
+        create_audit_entry("reset-stage", duration_seconds=1.0, summary=input_summary)
+
+        assert "caller_hints" not in input_summary
