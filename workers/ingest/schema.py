@@ -38,6 +38,24 @@ Fields intentionally omitted
 fields that are exclusively populated by post-ingest enrichment (e.g.
 narrator centrality / pagerank) are excluded so an unenriched batch
 doesn't wipe them out.
+
+Contract: ingest batches cannot clear fields
+--------------------------------------------
+The allow-listed properties are written with
+``n.<f> = coalesce(row.props.<f>, n.<f>)`` in ``_build_node_cypher`` /
+``_build_edge_cypher``. The coalesce is asymmetric on the explicit-null
+branch:
+
+- field omitted from ``row.props``  → preserve existing value
+- field present with explicit null  → preserve existing value (silent no-op)
+- field present with a new value    → overwrite
+
+A normalize-stage batch therefore cannot null out a stale ``grade`` or
+remove a ``sect_affiliation`` that a later source disavowed — emitting
+``{"grade": null}`` is a no-op against the live node. This is the
+intended Phase-4 default (scholar curation must survive ingest churn);
+field-clearing, if needed, will arrive on a separate corrections path
+rather than through this allow-list. See #23.
 """
 
 from __future__ import annotations
