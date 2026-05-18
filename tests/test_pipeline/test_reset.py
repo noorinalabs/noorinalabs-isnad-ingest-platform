@@ -15,10 +15,12 @@ import pytest
 
 from src.pipeline.reset import (
     ALL_PIPELINE_TOPICS,
+    CONFIRMATION_METHODS,
     STAGE_PREFIXES,
     STAGE_TOPICS,
     PipelineResetter,
     ResetScope,
+    write_dry_run_audit,
 )
 
 
@@ -354,3 +356,141 @@ class TestResetScopeDescribe:
         out = ResetScope.full_scope().describe()
 
         assert "PRESERVED" in out
+
+
+class TestAuditSummaryFieldsExplicit:
+    """Issue #16: audit summary must record dry_run, confirmation_method,
+    and scope_stage/scope_source as discrete fields (not substring-inferable).
+
+    SIEM and Grafana querying needs field-equality filters like
+    ``summary.scope_source == "sunnah-api"`` without regex-scanning
+    JSON-serialized ``s3_prefixes_deleted`` lists."""
+
+    def test_stage_summary_records_scope_stage_and_null_source(
+        self, resetter: PipelineResetter, tmp_path: Path
+    ) -> None:
+        _report, _entry, audit_path = resetter.reset(ResetScope.stage_scope("dedup"))
+
+        summary = json.loads(audit_path.read_text())["summary"]
+        assert summary["scope_stage"] == "dedup"
+        assert summary["scope_source"] is None
+        assert summary["dry_run"] is False
+        assert summary["confirmation_method"] == "not-required"
+
+    def test_source_summary_records_scope_source_and_null_stage(
+        self, resetter: PipelineResetter, tmp_path: Path
+    ) -> None:
+        _report, _entry, audit_path = resetter.reset(ResetScope.source_scope("sunnah-api"))
+
+        summary = json.loads(audit_path.read_text())["summary"]
+        assert summary["scope_source"] == "sunnah-api"
+        assert summary["scope_stage"] is None
+        assert summary["dry_run"] is False
+
+    def test_full_summary_records_null_stage_and_source(
+        self, resetter: PipelineResetter, tmp_path: Path
+    ) -> None:
+        _report, _entry, audit_path = resetter.reset(
+            ResetScope.full_scope(), confirmation_method="yes-flag"
+        )
+
+        summary = json.loads(audit_path.read_text())["summary"]
+        assert summary["scope_stage"] is None
+        assert summary["scope_source"] is None
+        assert summary["confirmation_method"] == "yes-flag"
+        assert summary["dry_run"] is False
+
+    def test_confirmation_method_interactive_recorded(
+        self, resetter: PipelineResetter, tmp_path: Path
+    ) -> None:
+        _report, _entry, audit_path = resetter.reset(
+            ResetScope.full_scope(), confirmation_method="interactive"
+        )
+
+        summary = json.loads(audit_path.read_text())["summary"]
+        assert summary["confirmation_method"] == "interactive"
+
+    def test_confirmation_method_rejects_unknown_value(self, resetter: PipelineResetter) -> None:
+        with pytest.raises(ValueError, match="invalid confirmation_method"):
+            resetter.reset(ResetScope.stage_scope("raw"), confirmation_method="approved")
+
+    def test_confirmation_methods_enum_locked(self) -> None:
+        """Guard test — adding/removing a confirmation method is a contract
+        change for downstream SIEM dashboards. Bump intentionally."""
+        assert CONFIRMATION_METHODS == frozenset({"interactive", "yes-flag", "not-required"})
+
+    def test_report_carries_new_fields_for_caller_inspection(
+        self, resetter: PipelineResetter
+    ) -> None:
+        report, _entry, _path = resetter.reset(
+            ResetScope.source_scope("thaqalayn"), confirmation_method="not-required"
+        )
+
+        assert report.dry_run is False
+        assert report.confirmation_method == "not-required"
+        assert report.scope_source == "thaqalayn"
+        assert report.scope_stage is None
+
+
+class TestDryRunAudit:
+    """Issue #16: dry-runs must write an audit entry tagged ``dry_run=True``
+    (today, dry-run skips audit entirely). ``write_dry_run_audit`` is a
+    module-level helper so the CLI dry-run path can call it without
+    constructing the four heavyweight reset adapters."""
+
+    def test_dry_run_writes_audit_entry_with_dry_run_true(self, tmp_path: Path) -> None:
+        report, _entry, audit_path = write_dry_run_audit(
+            ResetScope.full_scope(),
+            confirmation_method="interactive",
+            data_dir=tmp_path,
+        )
+
+        assert audit_path.exists()
+        assert report.dry_run is True
+
+        data = json.loads(audit_path.read_text())
+        assert data["stage"] == "reset-full"
+        assert data["summary"]["dry_run"] is True
+        assert data["summary"]["confirmation_method"] == "interactive"
+
+    def test_dry_run_zeroes_all_deletion_counters(self, tmp_path: Path) -> None:
+        _report, _entry, audit_path = write_dry_run_audit(
+            ResetScope.full_scope(),
+            confirmation_method="yes-flag",
+            data_dir=tmp_path,
+        )
+
+        summary = json.loads(audit_path.read_text())["summary"]
+        assert summary["s3_objects_deleted"] == 0
+        assert summary["s3_prefixes_deleted"] == []
+        assert summary["kafka_topics_reset"] == []
+        assert summary["neo4j_rows_deleted"] == 0
+        assert summary["pg_rows_deleted"] == 0
+
+    def test_dry_run_carries_scope_fields(self, tmp_path: Path) -> None:
+        _report, _entry, stage_path = write_dry_run_audit(
+            ResetScope.stage_scope("enriched"),
+            confirmation_method="not-required",
+            data_dir=tmp_path,
+        )
+        _r2, _e2, source_path = write_dry_run_audit(
+            ResetScope.source_scope("sunnah-api"),
+            confirmation_method="not-required",
+            data_dir=tmp_path,
+        )
+
+        stage_summary = json.loads(stage_path.read_text())["summary"]
+        assert stage_summary["scope_stage"] == "enriched"
+        assert stage_summary["scope_source"] is None
+
+        source_summary = json.loads(source_path.read_text())["summary"]
+        assert source_summary["scope_source"] == "sunnah-api"
+        assert source_summary["scope_stage"] is None
+
+    def test_dry_run_rejects_unknown_confirmation_method(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="invalid confirmation_method"):
+            write_dry_run_audit(
+                ResetScope.full_scope(),
+                confirmation_method="rubber-stamp",
+                data_dir=tmp_path,
+            )
