@@ -131,9 +131,14 @@ class EnrichProcessor:
         _logger.info("enrich_pipeline_loaded", model=_MODEL_NAME)
         return True
 
-    def _load_batch(self, payload: bytes) -> tuple[list[str], list[str]]:
-        """Read the input Parquet and return (ids, texts), dropping too-short matn rows."""
-        table = pq.read_table(io.BytesIO(payload), columns=["source_id", "matn_en"])
+    def _load_batch(self, stream: Any) -> tuple[list[str], list[str]]:
+        """Read the input Parquet and return (ids, texts), dropping too-short matn rows.
+
+        ``stream`` is the file-like body returned by ``ObjectStore.get_object``
+        — pyarrow reads only the projected columns, so the full batch is
+        never materialized in worker memory.
+        """
+        table = pq.read_table(stream, columns=["source_id", "matn_en"])
         ids: list[str] = []
         texts: list[str] = []
         for i in range(table.num_rows):
@@ -193,22 +198,23 @@ class EnrichProcessor:
         )
 
     def __call__(self, msg: PipelineMessage) -> PipelineMessage:
-        payload = self.store.get_object(msg.b2_path)
-
         out_prefix = f"enriched/{msg.source}/{msg.batch_id}"
         hadiths_key = f"{out_prefix}/hadiths.parquet"
         topics_key = f"{out_prefix}/hadith_topics.parquet"
 
-        # Always pass-through the hadith payload so downstream stages
-        # see the full set of rows regardless of classifier availability.
-        self.store.put_object(hadiths_key, payload)
+        # Always pass-through the hadith payload via server-side copy so
+        # downstream stages see the full set of rows regardless of
+        # classifier availability. Server-side copy avoids rehydrating
+        # the Parquet through worker memory — the streaming get_object
+        # refactor (#12) means we no longer have a buffered copy.
+        self.store.copy_object(msg.b2_path, hadiths_key)
 
         if not self._ensure_classifier():
             self.store.put_object(topics_key, _empty_topics_bytes())
             return msg.to_next_stage(b2_path=hadiths_key)
 
         try:
-            ids, texts = self._load_batch(payload)
+            ids, texts = self._load_batch(self.store.get_object(msg.b2_path))
         except pa.ArrowInvalid as exc:
             _logger.error("enrich_bad_parquet", batch_id=msg.batch_id, error=str(exc))
             raise

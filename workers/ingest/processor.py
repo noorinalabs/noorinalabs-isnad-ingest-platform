@@ -47,7 +47,6 @@ tolerance.
 
 from __future__ import annotations
 
-import io
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -103,10 +102,15 @@ def _normalize_prefix(b2_path: str) -> str:
 
 
 def _read_manifest(store: ObjectStore, prefix: str) -> dict[str, Any]:
-    """Fetch and parse ``_MANIFEST.json`` from ``prefix``."""
+    """Fetch and parse ``_MANIFEST.json`` from ``prefix``.
+
+    The manifest is small (a few KB at most), so we materialize it via
+    ``.read()`` on the streaming body rather than passing the stream to
+    a JSON parser — ``json.loads`` accepts only bytes/str.
+    """
     key = f"{prefix}{_MANIFEST_FILENAME}"
     try:
-        raw = store.get_object(key)
+        raw = store.get_object(key).read()
     except Exception as exc:  # noqa: BLE001 — surface any read failure as missing manifest
         msg = f"manifest not readable at {key!r}: {exc}"
         raise ManifestMissingError(msg) from exc
@@ -164,11 +168,17 @@ def _split_manifest_entries(
 # ---------------------------------------------------------------------------
 
 
-def _rows_from_parquet(payload: bytes) -> list[dict[str, Any]]:
-    """Decode Parquet bytes into row dicts."""
+def _rows_from_parquet(stream: Any) -> list[dict[str, Any]]:
+    """Decode a streaming Parquet body into row dicts.
+
+    ``stream`` is the file-like body returned by ``ObjectStore.get_object``
+    (botocore ``StreamingBody`` in prod). ``pq.read_table`` accepts any
+    ``.read``-bearing object, so we avoid buffering the per-label Parquet
+    in worker memory before parsing.
+    """
     import pyarrow.parquet as pq
 
-    table = pq.read_table(io.BytesIO(payload))
+    table = pq.read_table(stream)
     return list(table.to_pylist())
 
 
@@ -365,11 +375,11 @@ class IngestProcessor:
             label = entry["label"]
             key = f"{prefix}{entry['path']}"
             try:
-                payload = self.store.get_object(key)
+                stream = self.store.get_object(key)
             except Exception as exc:  # noqa: BLE001 — any read failure = missing parquet
                 msg_err = f"manifest lists {label} parquet at {key!r} but read failed: {exc}"
                 raise UnknownSchemaError(msg_err) from exc
-            raw_rows = _rows_from_parquet(payload)
+            raw_rows = _rows_from_parquet(stream)
             shaped = _node_rows_for_merge(label, raw_rows)
             if shaped:
                 nodes_by_label[label] = shaped
@@ -379,11 +389,11 @@ class IngestProcessor:
         if edges_entry is not None:
             key = f"{prefix}{edges_entry['path']}"
             try:
-                payload = self.store.get_object(key)
+                stream = self.store.get_object(key)
             except Exception as exc:  # noqa: BLE001 — any read failure = missing parquet
                 msg_err = f"manifest lists edges parquet at {key!r} but read failed: {exc}"
                 raise UnknownSchemaError(msg_err) from exc
-            raw_rows = _rows_from_parquet(payload)
+            raw_rows = _rows_from_parquet(stream)
             edges_by_label = _edge_rows_for_merge(raw_rows)
 
         if not nodes_by_label and not edges_by_label:

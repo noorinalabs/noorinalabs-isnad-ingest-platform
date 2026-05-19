@@ -126,11 +126,14 @@ class DedupProcessor:
         self._np = np
         return True
 
-    def _load_batch(self, payload: bytes) -> tuple[list[str], list[str], list[str]]:
-        """Read the input Parquet and return (ids, texts, corpora), dropping null matn rows."""
-        table = pq.read_table(
-            io.BytesIO(payload), columns=["source_id", "matn_en", "source_corpus"]
-        )
+    def _load_batch(self, stream: Any) -> tuple[list[str], list[str], list[str]]:
+        """Read the input Parquet and return (ids, texts, corpora), dropping null matn rows.
+
+        ``stream`` is the file-like body returned by ``ObjectStore.get_object``
+        — pyarrow reads only the columns we project, so the entire batch is
+        never materialized in worker memory.
+        """
+        table = pq.read_table(stream, columns=["source_id", "matn_en", "source_corpus"])
         ids: list[str] = []
         texts: list[str] = []
         corpora: list[str] = []
@@ -218,22 +221,24 @@ class DedupProcessor:
         )
 
     def __call__(self, msg: PipelineMessage) -> PipelineMessage:
-        payload = self.store.get_object(msg.b2_path)
-
         out_prefix = f"dedup/{msg.source}/{msg.batch_id}"
         hadiths_key = f"{out_prefix}/hadiths.parquet"
         links_key = f"{out_prefix}/parallel_links.parquet"
 
-        # Pass-through the hadith payload unchanged so downstream stages
-        # consume from the dedup prefix regardless of dedup success.
-        self.store.put_object(hadiths_key, payload)
+        # Pass-through the hadith payload unchanged via server-side copy
+        # so downstream stages consume from the dedup prefix regardless
+        # of dedup success. Server-side copy avoids rehydrating the
+        # (potentially multi-GB) Parquet through worker memory — the
+        # streaming get_object refactor (#12) means we no longer have a
+        # buffered copy to re-upload.
+        self.store.copy_object(msg.b2_path, hadiths_key)
 
         if not self._ensure_ml():
             self.store.put_object(links_key, _empty_links_bytes())
             return msg.to_next_stage(b2_path=hadiths_key)
 
         try:
-            ids, texts, corpora = self._load_batch(payload)
+            ids, texts, corpora = self._load_batch(self.store.get_object(msg.b2_path))
         except pa.ArrowInvalid as exc:
             # Malformed Parquet → raise so the runner routes to DLQ.
             _logger.error("dedup_bad_parquet", batch_id=msg.batch_id, error=str(exc))
