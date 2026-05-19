@@ -214,7 +214,8 @@ class EnrichProcessor:
             return msg.to_next_stage(b2_path=hadiths_key)
 
         try:
-            ids, texts = self._load_batch(self.store.get_object(msg.b2_path))
+            with self.store.get_object(msg.b2_path) as stream:
+                ids, texts = self._load_batch(stream)
         except pa.ArrowInvalid as exc:
             _logger.error("enrich_bad_parquet", batch_id=msg.batch_id, error=str(exc))
             raise

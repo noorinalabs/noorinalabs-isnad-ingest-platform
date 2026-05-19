@@ -15,15 +15,27 @@ bytes through the worker process), and ``rename_object`` (atomic
     normalized/{batch-id}/{filename}
     staged/{batch-id}/{filename}
 
-Streaming reads (#12)
----------------------
-``get_object`` returns the underlying response body — botocore's
-``StreamingBody`` in prod, a ``.read()``-compatible fake in tests — so
-consumers feed it directly to ``pyarrow.parquet.read_table`` /
-``ParquetFile`` instead of buffering the entire Parquet (multi-GB in
-realistic pipeline batches) into worker memory. Callers that genuinely
-need the bytes (e.g. ``json.loads`` over a small manifest) call
-``.read()`` on the returned stream explicitly.
+Bounded-memory reads (#12, PR #46 fixup)
+----------------------------------------
+``get_object`` spools the response body into a
+``tempfile.SpooledTemporaryFile`` and returns the seekable file-like.
+The spool keeps the body in-memory while it's under ``SPOOL_MAX_SIZE``
+and transparently spills to a real on-disk tempfile above that
+threshold — so worker memory is bounded regardless of batch size while
+Parquet's footer-at-end format still gets the random access it needs.
+
+Why a spool and not a raw ``StreamingBody``: real botocore
+``StreamingBody`` inherits ``io.IOBase`` defaults (``seekable() ->
+False``, ``seek()`` raises ``UnsupportedOperation``). pyarrow's
+``read_table`` / ``ParquetFile`` always seek to the Parquet footer
+before reading row groups, so a raw non-seekable body hard-fails on
+the first batch. The PR #46 first cut returned the body directly and
+the test fake hid the failure by exposing seek; the spool fix is the
+prod-faithful path.
+
+Callers MUST treat the returned object as a context manager
+(``with store.get_object(key) as f: ...``) so the spool's disk file
+(if it spilled) is properly closed.
 
 In tests, the :class:`ObjectStore` can be constructed with a fake
 ``client`` to stub out network I/O — see ``tests/workers/conftest.py``.
@@ -31,9 +43,24 @@ In tests, the :class:`ObjectStore` can be constructed with a fake
 
 from __future__ import annotations
 
-from typing import Any
+import shutil
+import tempfile
+from typing import IO, Any
 
-__all__ = ["ObjectStore"]
+__all__ = ["ObjectStore", "SPOOL_MAX_SIZE"]
+
+# Max in-memory bytes before SpooledTemporaryFile spills to disk. Set so
+# the realistic small-Parquet path (sub-batch manifests, side-tables) stays
+# fully in-memory while the multi-GB hadith-batch Parquets always spill —
+# the pipeline's pointer-message contract permits batches well beyond this,
+# and disk-backed reads are still streaming-fast on the SSD-class storage
+# the worker containers run on.
+SPOOL_MAX_SIZE = 8 * 1024 * 1024  # 8 MiB
+
+# Chunk size for the spool-fill copy. 64 KiB matches the page-cache friendly
+# I/O size and is the default ``shutil.copyfileobj`` would use minus a
+# factor — explicit so the budget is reviewable.
+_SPOOL_CHUNK_SIZE = 64 * 1024
 
 
 class ObjectStore:
@@ -58,19 +85,36 @@ class ObjectStore:
             self._client = boto3.client("s3", **kwargs)
         return self._client
 
-    def get_object(self, key: str) -> Any:
-        """Fetch a streaming reader for ``key`` from the configured bucket.
+    def get_object(self, key: str) -> IO[bytes]:
+        """Fetch a bounded-memory seekable reader for ``key``.
 
-        Returns the response body directly — botocore ``StreamingBody`` in
-        production. The returned object exposes ``.read([amt])`` and is
-        accepted by ``pyarrow.parquet.read_table`` / ``ParquetFile`` as a
-        file-like input, so Parquet consumers iterate row groups without
-        materializing the full object in worker memory. Callers that need
-        the bytes (small JSON manifests, JSON-encoded props blobs) call
-        ``.read()`` on the returned stream once and operate on the bytes.
+        Returns a ``tempfile.SpooledTemporaryFile`` pre-filled from the
+        S3/B2 body and rewound to offset 0. The spool keeps the body in
+        memory while it stays under :data:`SPOOL_MAX_SIZE` (8 MiB) and
+        spills to disk above that — so worker memory is bounded
+        regardless of batch size while pyarrow's seek-to-footer still
+        works.
+
+        Callers SHOULD use this as a context manager so the on-disk
+        spool (if it spilled) is properly closed and unlinked::
+
+            with store.get_object(key) as stream:
+                table = pq.read_table(stream)
         """
         response = self.client.get_object(Bucket=self.bucket, Key=key)
-        return response["Body"]
+        body = response["Body"]
+        spool = tempfile.SpooledTemporaryFile(max_size=SPOOL_MAX_SIZE)
+        try:
+            shutil.copyfileobj(body, spool, length=_SPOOL_CHUNK_SIZE)
+            spool.seek(0)
+        except BaseException:
+            spool.close()
+            raise
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
+        return spool
 
     def put_object(
         self, key: str, data: bytes, content_type: str = "application/octet-stream"

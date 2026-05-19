@@ -110,7 +110,8 @@ def _read_manifest(store: ObjectStore, prefix: str) -> dict[str, Any]:
     """
     key = f"{prefix}{_MANIFEST_FILENAME}"
     try:
-        raw = store.get_object(key).read()
+        with store.get_object(key) as stream:
+            raw = stream.read()
     except Exception as exc:  # noqa: BLE001 — surface any read failure as missing manifest
         msg = f"manifest not readable at {key!r}: {exc}"
         raise ManifestMissingError(msg) from exc
@@ -375,11 +376,11 @@ class IngestProcessor:
             label = entry["label"]
             key = f"{prefix}{entry['path']}"
             try:
-                stream = self.store.get_object(key)
+                with self.store.get_object(key) as stream:
+                    raw_rows = _rows_from_parquet(stream)
             except Exception as exc:  # noqa: BLE001 — any read failure = missing parquet
                 msg_err = f"manifest lists {label} parquet at {key!r} but read failed: {exc}"
                 raise UnknownSchemaError(msg_err) from exc
-            raw_rows = _rows_from_parquet(stream)
             shaped = _node_rows_for_merge(label, raw_rows)
             if shaped:
                 nodes_by_label[label] = shaped
@@ -389,11 +390,11 @@ class IngestProcessor:
         if edges_entry is not None:
             key = f"{prefix}{edges_entry['path']}"
             try:
-                stream = self.store.get_object(key)
+                with self.store.get_object(key) as stream:
+                    raw_rows = _rows_from_parquet(stream)
             except Exception as exc:  # noqa: BLE001 — any read failure = missing parquet
                 msg_err = f"manifest lists edges parquet at {key!r} but read failed: {exc}"
                 raise UnknownSchemaError(msg_err) from exc
-            raw_rows = _rows_from_parquet(stream)
             edges_by_label = _edge_rows_for_merge(raw_rows)
 
         if not nodes_by_label and not edges_by_label:

@@ -238,7 +238,8 @@ class DedupProcessor:
             return msg.to_next_stage(b2_path=hadiths_key)
 
         try:
-            ids, texts, corpora = self._load_batch(self.store.get_object(msg.b2_path))
+            with self.store.get_object(msg.b2_path) as stream:
+                ids, texts, corpora = self._load_batch(stream)
         except pa.ArrowInvalid as exc:
             # Malformed Parquet → raise so the runner routes to DLQ.
             _logger.error("dedup_bad_parquet", batch_id=msg.batch_id, error=str(exc))

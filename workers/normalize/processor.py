@@ -473,13 +473,12 @@ class NormalizeProcessor:
     # ---- the main entry point ----
 
     def __call__(self, msg: PipelineMessage) -> PipelineMessage:
-        stream = self.store.get_object(msg.b2_path)
-
-        try:
-            normalized, dropped = self._coerce_to_target_schema(stream)
-        except (pa.ArrowInvalid, ValueError) as exc:
-            _logger.error("normalize_invalid_batch", batch_id=msg.batch_id, error=str(exc))
-            raise
+        with self.store.get_object(msg.b2_path) as stream:
+            try:
+                normalized, dropped = self._coerce_to_target_schema(stream)
+            except (pa.ArrowInvalid, ValueError) as exc:
+                _logger.error("normalize_invalid_batch", batch_id=msg.batch_id, error=str(exc))
+                raise
 
         # Fan-out every surviving row into graph entities.
         nodes_by_label: dict[str, list[_NodeRow]] = {}

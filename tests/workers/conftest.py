@@ -38,28 +38,34 @@ class FakeConsumer:
         return iter(self._records)
 
 
-class _FakeStreamingBody:
-    """Stand-in for ``botocore.response.StreamingBody``.
+class _FakeStreamingBody(io.IOBase):
+    """Faithful stand-in for ``botocore.response.StreamingBody``.
 
-    Exposes the file-like surface pyarrow's ``read_table`` /
-    ``ParquetFile`` uses (``read([amt])``, ``seek``, ``tell``,
-    ``seekable``, ``readable``, ``close``) plus botocore's
-    ``iter_chunks``. Backed by ``io.BytesIO`` so the test fixture can
-    also be read incrementally and verified for memory-bounded
-    behaviour. Real ``StreamingBody`` is non-seekable in prod, but
-    pyarrow degrades cleanly via internal buffering in that case — for
-    the unit suite we keep seek semantics so memory-ceiling assertions
-    measure pyarrow's working set rather than the buffering wrapper.
+    Mirrors the real prod surface exactly: non-seekable, read-only,
+    iter_chunks-capable. Real ``StreamingBody`` inherits ``io.IOBase``'s
+    defaults (``seekable() -> False``, ``seek()`` raises
+    ``io.UnsupportedOperation``), so callers that need random access
+    must spool the body into a seekable buffer first.
+
+    Parquet's footer-at-end format requires random access. The previous
+    revision of this fake exposed ``seek``, which masked the prod
+    failure (PR #46 reviewer convergence: Sayed + Tomás). The current
+    surface forces ``ObjectStore.get_object`` to spool the streaming
+    body into a seekable file-like (``tempfile.SpooledTemporaryFile``)
+    BEFORE returning it, just as prod botocore would require.
     """
 
     def __init__(self, data: bytes) -> None:
+        super().__init__()
         self._buf = io.BytesIO(data)
-        self._size = len(data)
 
     def read(self, amt: int | None = None) -> bytes:
         if amt is None:
             return self._buf.read()
         return self._buf.read(amt)
+
+    def readable(self) -> bool:
+        return True
 
     def iter_chunks(self, chunk_size: int = 1024) -> Any:
         while True:
@@ -68,26 +74,9 @@ class _FakeStreamingBody:
                 return
             yield chunk
 
-    def seek(self, offset: int, whence: int = 0) -> int:
-        return self._buf.seek(offset, whence)
-
-    def tell(self) -> int:
-        return self._buf.tell()
-
-    def seekable(self) -> bool:
-        return True
-
-    def readable(self) -> bool:
-        return True
-
     def close(self) -> None:
         self._buf.close()
-
-    @property
-    def closed(self) -> bool:
-        # pyarrow's native file detection checks ``.closed`` to decide
-        # whether it can take ownership of the stream.
-        return self._buf.closed
+        super().close()
 
 
 class FakeS3Client:
