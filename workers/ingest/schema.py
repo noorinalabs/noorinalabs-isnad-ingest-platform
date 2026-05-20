@@ -10,11 +10,27 @@ is dropped before the Cypher statement is built.
 Source of truth
 ---------------
 The property names mirror the Pydantic models in
-``noorinalabs-isnad-graph/src/models/*``. Keeping the two in sync is a
-manual step today — when a model grows a new field the ingest allow-list
-must grow to match, otherwise normalize will emit a row whose prop
-silently drops. A future followup (tracked in #192) could codegen these
-maps from the shared models.
+``noorinalabs-isnad-graph/src/models/*``. This file is hand-authored
+canonical (developers grep against it), but mirror integrity is
+enforced by a CI gate in the isnad-graph repo:
+
+  noorinalabs-isnad-graph/.github/workflows/schema-drift.yml
+  noorinalabs-isnad-graph/scripts/emit_ingest_schema.py
+
+The gate runs on every isnad-graph PR. It fetches this file via
+sparse-checkout, derives the model-canonical allow-list from
+``model_fields``, and fails if either direction drifts (a model field
+ingest doesn't accept, OR a phantom ingest field not on the model).
+Rationalized asymmetry is declared in
+``noorinalabs-isnad-graph/scripts/{ingest,model}-extras.yaml`` with
+per-field tracking issue. See #24 for the design.
+
+When a model grows a new field, the isnad-graph PR will fail CI until
+EITHER (a) a sibling PR to this file lands adding the field to the
+appropriate allow-list, OR (b) the model field is excused via
+``model-extras.yaml`` with a category + tracking issue. The two PRs do
+not need to merge atomically — the workflow resolves to the matching
+wave-branch with main fallback so PRs in the same wave window converge.
 
 Fields intentionally omitted
 ----------------------------
@@ -22,6 +38,24 @@ Fields intentionally omitted
 fields that are exclusively populated by post-ingest enrichment (e.g.
 narrator centrality / pagerank) are excluded so an unenriched batch
 doesn't wipe them out.
+
+Contract: ingest batches cannot clear fields
+--------------------------------------------
+The allow-listed properties are written with
+``n.<f> = coalesce(row.props.<f>, n.<f>)`` in ``_build_node_cypher`` /
+``_build_edge_cypher``. The coalesce is asymmetric on the explicit-null
+branch:
+
+- field omitted from ``row.props``  → preserve existing value
+- field present with explicit null  → preserve existing value (silent no-op)
+- field present with a new value    → overwrite
+
+A normalize-stage batch therefore cannot null out a stale ``grade`` or
+remove a ``sect_affiliation`` that a later source disavowed — emitting
+``{"grade": null}`` is a no-op against the live node. This is the
+intended Phase-4 default (scholar curation must survive ingest churn);
+field-clearing, if needed, will arrive on a separate corrections path
+rather than through this allow-list. See #23.
 """
 
 from __future__ import annotations

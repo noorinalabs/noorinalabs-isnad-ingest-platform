@@ -58,10 +58,11 @@ class TestDedupProcessor:
         nxt = processor(sample_message)
 
         assert nxt.b2_path == "dedup/sunnah-api/batch-001/hadiths.parquet"
-        assert object_store.get_object(nxt.b2_path) == sample_hadith_parquet
+        assert object_store.get_object(nxt.b2_path).read() == sample_hadith_parquet
 
-        links_bytes = object_store.get_object("dedup/sunnah-api/batch-001/parallel_links.parquet")
-        links_table = pq.read_table(io.BytesIO(links_bytes))
+        links_table = pq.read_table(
+            object_store.get_object("dedup/sunnah-api/batch-001/parallel_links.parquet")
+        )
         assert links_table.schema.equals(PARALLEL_LINKS_SCHEMA)
         assert links_table.num_rows == 0
 
@@ -76,8 +77,9 @@ class TestDedupProcessor:
         nxt = processor(sample_message)
 
         assert nxt.b2_path == "dedup/sunnah-api/batch-001/hadiths.parquet"
-        links_bytes = object_store.get_object("dedup/sunnah-api/batch-001/parallel_links.parquet")
-        links_table = pq.read_table(io.BytesIO(links_bytes))
+        links_table = pq.read_table(
+            object_store.get_object("dedup/sunnah-api/batch-001/parallel_links.parquet")
+        )
         assert links_table.num_rows == 0
 
     def test_malformed_parquet_raises(
@@ -140,8 +142,9 @@ class TestDedupProcessor:
 
         DedupProcessor(object_store, threshold=0.5)(sample_message)
 
-        links_bytes = object_store.get_object("dedup/sunnah-api/batch-001/parallel_links.parquet")
-        links = pq.read_table(io.BytesIO(links_bytes))
+        links = pq.read_table(
+            object_store.get_object("dedup/sunnah-api/batch-001/parallel_links.parquet")
+        )
         assert links.schema.equals(PARALLEL_LINKS_SCHEMA)
         ids_a = links.column("hadith_id_a").to_pylist()
         ids_b = links.column("hadith_id_b").to_pylist()
@@ -169,12 +172,11 @@ class TestEnrichProcessor:
         nxt = processor(sample_message)
 
         assert nxt.b2_path == "enriched/sunnah-api/batch-001/hadiths.parquet"
-        assert object_store.get_object(nxt.b2_path) == sample_hadith_parquet
+        assert object_store.get_object(nxt.b2_path).read() == sample_hadith_parquet
 
-        topics_bytes = object_store.get_object(
-            "enriched/sunnah-api/batch-001/hadith_topics.parquet"
+        topics = pq.read_table(
+            object_store.get_object("enriched/sunnah-api/batch-001/hadith_topics.parquet")
         )
-        topics = pq.read_table(io.BytesIO(topics_bytes))
         assert topics.schema.equals(HADITH_TOPICS_SCHEMA)
         assert topics.num_rows == 0
 
@@ -208,9 +210,7 @@ class TestEnrichProcessor:
         # No rows met the min length, classifier should not have been called.
         assert _StubClassifier.called_with == []
         topics = pq.read_table(
-            io.BytesIO(
-                object_store.get_object("enriched/sunnah-api/batch-001/hadith_topics.parquet")
-            )
+            object_store.get_object("enriched/sunnah-api/batch-001/hadith_topics.parquet")
         )
         assert topics.num_rows == 0
 
@@ -240,9 +240,7 @@ class TestEnrichProcessor:
         processor(sample_message)
 
         topics = pq.read_table(
-            io.BytesIO(
-                object_store.get_object("enriched/sunnah-api/batch-001/hadith_topics.parquet")
-            )
+            object_store.get_object("enriched/sunnah-api/batch-001/hadith_topics.parquet")
         )
         assert topics.num_rows == 2
         assert topics.column("topic_1").to_pylist() == ["theology", "theology"]
@@ -263,14 +261,13 @@ class TestNormalizeProcessor:
 
     @staticmethod
     def _read_manifest(store: ObjectStore, prefix: str) -> dict[str, Any]:
-        body = store.get_object(f"{prefix}_MANIFEST.json")
+        body = store.get_object(f"{prefix}_MANIFEST.json").read()
         result: dict[str, Any] = json.loads(body.decode("utf-8"))
         return result
 
     @staticmethod
     def _read_nodes(store: ObjectStore, prefix: str, filename: str) -> list[dict[str, Any]]:
-        body = store.get_object(f"{prefix}{filename}")
-        table = pq.read_table(io.BytesIO(body))
+        table = pq.read_table(store.get_object(f"{prefix}{filename}"))
         rows = table.to_pylist()
         # Decode the JSON-encoded props column for test assertions.
         return [{**r, "props": json.loads(r["props"])} for r in rows]
@@ -344,8 +341,7 @@ class TestNormalizeProcessor:
         # Edges present for APPEARS_IN (per-hadith) + GRADED_BY (h2) +
         # TRANSMITTED_TO (N-1 narrators in h1's chain) + NARRATED (first
         # narrator -> h1).
-        edges_body = object_store.get_object(f"{nxt.b2_path}edges.parquet")
-        edges_table = pq.read_table(io.BytesIO(edges_body))
+        edges_table = pq.read_table(object_store.get_object(f"{nxt.b2_path}edges.parquet"))
         edge_labels = edges_table.column("label").to_pylist()
         assert edge_labels.count("APPEARS_IN") == 2
         assert edge_labels.count("GRADED_BY") == 1
@@ -367,8 +363,7 @@ class TestNormalizeProcessor:
         for entry in manifest["parquets"]:
             if entry["path"] == "edges.parquet":
                 continue
-            body = object_store.get_object(f"{nxt.b2_path}{entry['path']}")
-            table = pq.read_table(io.BytesIO(body))
+            table = pq.read_table(object_store.get_object(f"{nxt.b2_path}{entry['path']}"))
             for label in set(table.column("label").to_pylist()):
                 assert label in ALLOWED_NODE_LABELS, f"normalize emitted unknown label {label!r}"
 
@@ -411,8 +406,7 @@ class TestNormalizeProcessor:
 
         manifest = self._read_manifest(object_store, nxt.b2_path)
         for entry in manifest["parquets"]:
-            body = object_store.get_object(f"{nxt.b2_path}{entry['path']}")
-            table = pq.read_table(io.BytesIO(body))
+            table = pq.read_table(object_store.get_object(f"{nxt.b2_path}{entry['path']}"))
             assert table.num_rows == entry["row_count"], (
                 f"manifest lies about {entry['path']}: "
                 f"claims {entry['row_count']}, parquet has {table.num_rows}"

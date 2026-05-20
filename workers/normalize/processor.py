@@ -424,9 +424,15 @@ class NormalizeProcessor:
 
     # ---- shape coercion (unchanged behaviour, reused from the prior impl) ----
 
-    def _coerce_to_target_schema(self, payload: bytes) -> tuple[pa.Table, int]:
-        """Return (normalized_table, dropped_row_count). Raises on unusable input."""
-        table = pq.read_table(io.BytesIO(payload))
+    def _coerce_to_target_schema(self, stream: Any) -> tuple[pa.Table, int]:
+        """Return (normalized_table, dropped_row_count). Raises on unusable input.
+
+        ``stream`` is a file-like object (botocore ``StreamingBody`` in
+        prod) returned by ``ObjectStore.get_object``. ``pq.read_table``
+        accepts any object with ``.read``, so the Parquet body is fed
+        directly to pyarrow without first materializing it in memory.
+        """
+        table = pq.read_table(stream)
 
         missing = [f.name for f in self.target_schema if f.name not in table.column_names]
         if missing:
@@ -467,13 +473,12 @@ class NormalizeProcessor:
     # ---- the main entry point ----
 
     def __call__(self, msg: PipelineMessage) -> PipelineMessage:
-        payload = self.store.get_object(msg.b2_path)
-
-        try:
-            normalized, dropped = self._coerce_to_target_schema(payload)
-        except (pa.ArrowInvalid, ValueError) as exc:
-            _logger.error("normalize_invalid_batch", batch_id=msg.batch_id, error=str(exc))
-            raise
+        with self.store.get_object(msg.b2_path) as stream:
+            try:
+                normalized, dropped = self._coerce_to_target_schema(stream)
+            except (pa.ArrowInvalid, ValueError) as exc:
+                _logger.error("normalize_invalid_batch", batch_id=msg.batch_id, error=str(exc))
+                raise
 
         # Fan-out every surviving row into graph entities.
         nodes_by_label: dict[str, list[_NodeRow]] = {}

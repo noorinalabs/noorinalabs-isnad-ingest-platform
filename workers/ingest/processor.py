@@ -28,14 +28,25 @@ Design (issue #18, #192 D-ii)
       runner DLQs it.
     * ``UnknownSchemaError`` — manifest references an unknown label or
       an unknown edge type; runner DLQs.
-    * ``ServiceUnavailable`` — neo4j driver retries internally.
-    * ``SessionExpired`` — reopen session once and retry.
+    * Transient driver errors (``ServiceUnavailable``, ``TransientError``,
+      ``SessionExpired``) — the neo4j driver retries them internally
+      inside ``session.execute_write``, bounded by the driver-config
+      ``max_transaction_retry_time`` (default 30s). Once that wall-clock
+      bound is exhausted the last error propagates and the runner DLQs
+      it. Per-message Neo4j retry time is therefore capped at ~30s.
     * ``ClientError`` and everything else — propagate for DLQ.
+
+Issue #20 removed a redundant outer ``SessionExpired`` reopen that
+compounded with the driver-internal retry; ``SessionExpired.is_retryable()``
+returns True (verified in ``neo4j.exceptions`` and the ``_run_transaction``
+retry loop in ``neo4j._sync.work.session``), so the driver already
+retries the same call internally — re-running the batch on a fresh
+session doubled the worst-case retry budget without adding fault
+tolerance.
 """
 
 from __future__ import annotations
 
-import io
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -91,10 +102,16 @@ def _normalize_prefix(b2_path: str) -> str:
 
 
 def _read_manifest(store: ObjectStore, prefix: str) -> dict[str, Any]:
-    """Fetch and parse ``_MANIFEST.json`` from ``prefix``."""
+    """Fetch and parse ``_MANIFEST.json`` from ``prefix``.
+
+    The manifest is small (a few KB at most), so we materialize it via
+    ``.read()`` on the streaming body rather than passing the stream to
+    a JSON parser — ``json.loads`` accepts only bytes/str.
+    """
     key = f"{prefix}{_MANIFEST_FILENAME}"
     try:
-        raw = store.get_object(key)
+        with store.get_object(key) as stream:
+            raw = stream.read()
     except Exception as exc:  # noqa: BLE001 — surface any read failure as missing manifest
         msg = f"manifest not readable at {key!r}: {exc}"
         raise ManifestMissingError(msg) from exc
@@ -152,11 +169,17 @@ def _split_manifest_entries(
 # ---------------------------------------------------------------------------
 
 
-def _rows_from_parquet(payload: bytes) -> list[dict[str, Any]]:
-    """Decode Parquet bytes into row dicts."""
+def _rows_from_parquet(stream: Any) -> list[dict[str, Any]]:
+    """Decode a streaming Parquet body into row dicts.
+
+    ``stream`` is the file-like body returned by ``ObjectStore.get_object``
+    (botocore ``StreamingBody`` in prod). ``pq.read_table`` accepts any
+    ``.read``-bearing object, so we avoid buffering the per-label Parquet
+    in worker memory before parsing.
+    """
     import pyarrow.parquet as pq
 
-    table = pq.read_table(io.BytesIO(payload))
+    table = pq.read_table(stream)
     return list(table.to_pylist())
 
 
@@ -262,6 +285,18 @@ def _build_node_cypher(label: str) -> str:
     curated ``text_ar`` on a hadith survives an ingest batch that only
     carries ``text_en``. This is the core of Farhan's Phase-4 fix
     (#192 comment thread).
+
+    Coalesce-clear contract (per-field, applies to every SET line)
+    --------------------------------------------------------------
+    - field omitted from ``row.props``  → preserve existing value
+    - field present with explicit null  → preserve existing value (silent no-op)
+    - field present with a new value    → overwrite
+
+    The explicit-null branch is asymmetric on purpose: ingest batches
+    cannot clear node properties. A correction that needs to null a
+    field must reach Neo4j through a separate path (issue #23 / future
+    corrections topic). The same contract applies to
+    ``_build_edge_cypher``.
     """
     fields = NODE_PROPERTY_MAP.get(label, [])
     set_lines = ",\n    ".join(f"n.{f} = coalesce(row.props.{f}, n.{f})" for f in fields)
@@ -275,7 +310,16 @@ def _build_node_cypher(label: str) -> str:
 
 
 def _build_edge_cypher(label: str) -> str:
-    """Per-edge-label MERGE Cypher with enumerated, null-safe SET stanzas."""
+    """Per-edge-label MERGE Cypher with enumerated, null-safe SET stanzas.
+
+    Same coalesce-clear contract as ``_build_node_cypher``:
+
+    - field omitted from ``row.props``  → preserve existing value
+    - field present with explicit null  → preserve existing value (silent no-op)
+    - field present with a new value    → overwrite
+
+    Edge properties cannot be cleared via an ingest batch (see #23).
+    """
     fields = EDGE_PROPERTY_MAP.get(label, [])
     set_lines = ",\n    ".join(f"r.{f} = coalesce(row.props.{f}, r.{f})" for f in fields)
     set_clause = f"SET {set_lines}\n" if fields else ""
@@ -332,11 +376,11 @@ class IngestProcessor:
             label = entry["label"]
             key = f"{prefix}{entry['path']}"
             try:
-                payload = self.store.get_object(key)
+                with self.store.get_object(key) as stream:
+                    raw_rows = _rows_from_parquet(stream)
             except Exception as exc:  # noqa: BLE001 — any read failure = missing parquet
                 msg_err = f"manifest lists {label} parquet at {key!r} but read failed: {exc}"
                 raise UnknownSchemaError(msg_err) from exc
-            raw_rows = _rows_from_parquet(payload)
             shaped = _node_rows_for_merge(label, raw_rows)
             if shaped:
                 nodes_by_label[label] = shaped
@@ -346,11 +390,11 @@ class IngestProcessor:
         if edges_entry is not None:
             key = f"{prefix}{edges_entry['path']}"
             try:
-                payload = self.store.get_object(key)
+                with self.store.get_object(key) as stream:
+                    raw_rows = _rows_from_parquet(stream)
             except Exception as exc:  # noqa: BLE001 — any read failure = missing parquet
                 msg_err = f"manifest lists edges parquet at {key!r} but read failed: {exc}"
                 raise UnknownSchemaError(msg_err) from exc
-            raw_rows = _rows_from_parquet(payload)
             edges_by_label = _edge_rows_for_merge(raw_rows)
 
         if not nodes_by_label and not edges_by_label:
@@ -370,15 +414,22 @@ class IngestProcessor:
             )
             return None
 
-        from neo4j.exceptions import SessionExpired
-
         def _run_batch(tx: ManagedTransaction) -> dict[str, dict[str, int]]:
             """Single-transaction closure — all nodes first, then edges.
 
             Running both phases inside one ``execute_write`` means the
             driver's retry covers the whole batch, and edges always see
             their endpoints MATCH-able because the MERGE of nodes ran in
-            the same transaction scope.
+            the same transaction scope. The driver retries all transient
+            errors (``ServiceUnavailable``, ``TransientError``,
+            ``SessionExpired``) internally, bounded by
+            ``max_transaction_retry_time`` (default 30s); when the wall-
+            clock budget is exhausted the last error propagates and the
+            runner DLQs the message. Each retry iteration releases the
+            connection back to the pool and reacquires a fresh one (see
+            ``neo4j._sync.work.session._run_transaction`` lines 557 / 532),
+            so a ``SessionExpired`` triggers a fresh-connection retry
+            which on a cluster can land on a different cluster member.
             """
             merged_nodes: dict[str, int] = {}
             for node_label, label_rows in nodes_by_label.items():
@@ -388,17 +439,8 @@ class IngestProcessor:
                 merged_edges[edge_label] = _merge_edges_tx(tx, label=edge_label, rows=edge_rows)
             return {"nodes": merged_nodes, "edges": merged_edges}
 
-        def _run(session: Any) -> dict[str, dict[str, int]]:
-            result: dict[str, dict[str, int]] = session.execute_write(_run_batch)
-            return result
-
-        try:
-            with self.neo4j_driver.session() as session:
-                merged = _run(session)
-        except SessionExpired:
-            _logger.warning("ingest_session_expired_retrying", batch_id=msg.batch_id)
-            with self.neo4j_driver.session() as session:
-                merged = _run(session)
+        with self.neo4j_driver.session() as session:
+            merged: dict[str, dict[str, int]] = session.execute_write(_run_batch)
 
         _logger.info(
             "ingest_merged",

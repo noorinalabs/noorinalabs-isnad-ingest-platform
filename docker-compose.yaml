@@ -22,6 +22,7 @@ services:
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minio12345}
+      INGEST_CHECKPOINT_BACKEND: ${INGEST_CHECKPOINT_BACKEND:-pg}
       LOG_LEVEL: INFO
       LOG_FORMAT: json
     restart: on-failure
@@ -36,6 +37,7 @@ services:
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minio12345}
+      INGEST_CHECKPOINT_BACKEND: ${INGEST_CHECKPOINT_BACKEND:-pg}
       LOG_LEVEL: INFO
       LOG_FORMAT: json
     restart: on-failure
@@ -50,6 +52,7 @@ services:
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minio12345}
+      INGEST_CHECKPOINT_BACKEND: ${INGEST_CHECKPOINT_BACKEND:-pg}
       LOG_LEVEL: INFO
       LOG_FORMAT: json
     restart: on-failure
@@ -64,6 +67,7 @@ services:
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minio}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minio12345}
+      INGEST_CHECKPOINT_BACKEND: ${INGEST_CHECKPOINT_BACKEND:-pg}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme}

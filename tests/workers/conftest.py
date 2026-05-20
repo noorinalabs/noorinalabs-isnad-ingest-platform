@@ -38,31 +38,73 @@ class FakeConsumer:
         return iter(self._records)
 
 
+class _FakeStreamingBody(io.IOBase):
+    """Faithful stand-in for ``botocore.response.StreamingBody``.
+
+    Mirrors the real prod surface exactly: non-seekable, read-only,
+    iter_chunks-capable. Real ``StreamingBody`` inherits ``io.IOBase``'s
+    defaults (``seekable() -> False``, ``seek()`` raises
+    ``io.UnsupportedOperation``), so callers that need random access
+    must spool the body into a seekable buffer first.
+
+    Parquet's footer-at-end format requires random access. The previous
+    revision of this fake exposed ``seek``, which masked the prod
+    failure (PR #46 reviewer convergence: Sayed + Tomás). The current
+    surface forces ``ObjectStore.get_object`` to spool the streaming
+    body into a seekable file-like (``tempfile.SpooledTemporaryFile``)
+    BEFORE returning it, just as prod botocore would require.
+    """
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__()
+        self._buf = io.BytesIO(data)
+
+    def read(self, amt: int | None = None) -> bytes:
+        if amt is None:
+            return self._buf.read()
+        return self._buf.read(amt)
+
+    def readable(self) -> bool:
+        return True
+
+    def iter_chunks(self, chunk_size: int = 1024) -> Any:
+        while True:
+            chunk = self._buf.read(chunk_size)
+            if not chunk:
+                return
+            yield chunk
+
+    def close(self) -> None:
+        self._buf.close()
+        super().close()
+
+
 class FakeS3Client:
-    """In-memory S3 client supporting the two methods ``ObjectStore`` uses."""
+    """In-memory S3 client supporting the methods ``ObjectStore`` uses."""
 
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
+        # Track every call for invariant assertions (e.g. that dedup/enrich
+        # pass-through is satisfied by server-side copy, not a get→put
+        # round-trip through worker memory).
+        self.copy_calls: list[tuple[str, str, str]] = []
+        self.put_calls: list[tuple[str, str, int]] = []
+        self.get_calls: list[tuple[str, str]] = []
 
     def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
         body = self.objects[(Bucket, Key)]
-
-        class _Body:
-            def __init__(self, data: bytes) -> None:
-                self._data = data
-
-            def read(self) -> bytes:
-                return self._data
-
-        return {"Body": _Body(body)}
+        self.get_calls.append((Bucket, Key))
+        return {"Body": _FakeStreamingBody(body)}
 
     def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str = "") -> None:
         self.objects[(Bucket, Key)] = Body
+        self.put_calls.append((Bucket, Key, len(Body)))
 
     def copy_object(self, *, Bucket: str, Key: str, CopySource: dict[str, str]) -> dict[str, Any]:
         src_bucket = CopySource["Bucket"]
         src_key = CopySource["Key"]
         self.objects[(Bucket, Key)] = self.objects[(src_bucket, src_key)]
+        self.copy_calls.append((Bucket, src_key, Key))
         return {}
 
     def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:

@@ -6,7 +6,8 @@ FROM python:3.14-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_SYSTEM_PYTHON=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    INGEST_CHECKPOINT_BACKEND=pg
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential curl \

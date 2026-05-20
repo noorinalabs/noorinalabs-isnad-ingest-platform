@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from workers.dedup.processor import DedupProcessor
+from workers.lib.checkpoint_factory import build_checkpoint
 from workers.lib.log import configure_logging, get_logger
 from workers.lib.object_store import ObjectStore
 from workers.lib.runner import WorkerRunner, WorkerSettings
@@ -42,6 +43,7 @@ def build_runner() -> WorkerRunner:
         consumer=consumer,
         producer=producer,
         process=DedupProcessor(store),
+        checkpoint=build_checkpoint(settings.worker_name),
     )
 
 

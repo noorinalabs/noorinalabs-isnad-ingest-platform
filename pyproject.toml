@@ -120,4 +120,5 @@ pythonpath = ["."]
 markers = [
     "ml: marks tests requiring ML dependencies (sentence-transformers, faiss)",
     "integration: marks tests requiring Docker containers (Neo4j, PostgreSQL)",
+    "serial: marks tests that MUST run sequentially (measure global state — Arrow C++ pool, tracemalloc)",
 ]

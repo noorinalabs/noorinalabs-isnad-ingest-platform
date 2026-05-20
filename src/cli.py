@@ -407,7 +407,7 @@ def _cmd_reset(
     from pathlib import Path
 
     from src.config import get_settings
-    from src.pipeline.reset import PipelineResetter, ResetScope
+    from src.pipeline.reset import PipelineResetter, ResetScope, write_dry_run_audit
 
     # Build the scope first — validates inputs before any confirmation.
     provided = sum(1 for f in (stage, source, full) if f)
@@ -417,41 +417,54 @@ def _cmd_reset(
 
     if stage:
         scope = ResetScope.stage_scope(stage)
-        summary_line = f"STAGE reset: prefix '{stage}/' and consumer offsets"
     elif source:
         scope = ResetScope.source_scope(source)
-        summary_line = f"SOURCE reset: all stage prefixes for source '{source}'"
     else:
         scope = ResetScope.full_scope()
-        summary_line = (
-            "FULL reset: every pipeline B2 prefix, every pipeline Kafka topic, "
-            "Neo4j hadith graph, PG hadith metadata. "
-            "Users/roles/sessions are PRESERVED."
-        )
 
-    print(f"=== Pipeline Reset ===\n  {summary_line}\n")
+    print(f"=== Pipeline Reset ===\n{scope.describe()}\n")
 
-    if scope.level == "full" and not assume_yes:
-        confirm = input("Type 'OBLITERATE' to proceed: ").strip()
-        if confirm != "OBLITERATE":
-            print("Aborted.")
-            sys.exit(1)
-
-    if dry_run:
-        print("Dry run — no changes were made. Scope validated.")
-        return
+    # Track how the operator authorized the run. Only the full reset
+    # requires explicit confirmation today; stage/source scopes are
+    # recorded as "not-required" so SIEM queries can still filter
+    # by method without special-casing scope.
+    if scope.level == "full":
+        if assume_yes:
+            confirmation_method = "yes-flag"
+        else:
+            confirm = input("Type 'OBLITERATE' to proceed: ").strip()
+            if confirm != "OBLITERATE":
+                print("Aborted.")
+                sys.exit(1)
+            confirmation_method = "interactive"
+    else:
+        confirmation_method = "not-required"
 
     settings = get_settings()
+    data_dir = Path(settings.data_raw_dir).parent
+
+    if dry_run:
+        # Dry-run skips adapter construction (no boto3/kafka/neo4j/pg
+        # imports needed) but still writes an audit entry per issue #16.
+        _report, _entry, audit_path = write_dry_run_audit(
+            scope, confirmation_method=confirmation_method, data_dir=data_dir
+        )
+        print("\n=== Dry Run Complete (no changes made) ===")
+        print(f"  Level              : {scope.level}")
+        print(f"  Confirmation method: {confirmation_method}")
+        print(f"  Audit entry        : {audit_path}")
+        return
+
     object_store, kafka_admin, neo4j, pg = _build_reset_clients(settings)
 
     resetter = PipelineResetter(
-        object_store=object_store,
-        kafka_admin=kafka_admin,
-        neo4j=neo4j,
-        pg=pg,
-        data_dir=Path(settings.data_raw_dir).parent,
+        object_store=object_store,  # type: ignore[arg-type]
+        kafka_admin=kafka_admin,  # type: ignore[arg-type]
+        neo4j=neo4j,  # type: ignore[arg-type]
+        pg=pg,  # type: ignore[arg-type]
+        data_dir=data_dir,
     )
-    report, _entry, audit_path = resetter.reset(scope)
+    report, _entry, audit_path = resetter.reset(scope, confirmation_method=confirmation_method)
 
     print("\n=== Reset Complete ===")
     print(f"  Level              : {report.level}")
