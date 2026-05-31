@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from neo4j import Driver, ManagedTransaction
 
 __all__ = [
+    "EndpointMissingError",
     "IngestProcessor",
     "ManifestMissingError",
     "UnknownSchemaError",
@@ -80,6 +81,23 @@ class UnknownSchemaError(ValueError):
 
 class ManifestMissingError(UnknownSchemaError):
     """Raised when ``_MANIFEST.json`` is absent or cannot be parsed.
+
+    Subclass of ``UnknownSchemaError`` so the runner's existing DLQ
+    routing for schema errors catches this without a new branch.
+    """
+
+
+class EndpointMissingError(UnknownSchemaError):
+    """Raised when an edge MERGE references an endpoint absent from the graph.
+
+    #22 acceptance requires that a missing endpoint (``src_id`` or
+    ``dst_id`` that does not resolve to an existing node at MERGE time)
+    fail loud rather than silently skip. The old ``MATCH … MATCH … MERGE``
+    idiom dropped such rows with no error, no telemetry, no DLQ — an
+    undetectable data-loss class for the never-landing-endpoint case (see
+    #33). The edge Cypher now ``OPTIONAL MATCH``es both endpoints and
+    counts the rows where either side is null; a non-zero count raises
+    this error.
 
     Subclass of ``UnknownSchemaError`` so the runner's existing DLQ
     routing for schema errors catches this without a new branch.
@@ -310,9 +328,29 @@ def _build_node_cypher(label: str) -> str:
 
 
 def _build_edge_cypher(label: str) -> str:
-    """Per-edge-label MERGE Cypher with enumerated, null-safe SET stanzas.
+    """Per-edge-label MERGE Cypher with fail-loud missing-endpoint detection.
 
-    Same coalesce-clear contract as ``_build_node_cypher``:
+    #22 acceptance: *"endpoint missing (both src_id and dst_id must exist
+    — MERGE on node first or fail loud)"*. The original idiom
+
+        MATCH (s {id: row.src_id})
+        MATCH (t {id: row.dst_id})
+        MERGE (s)-[r:`label`]->(t)
+
+    silently dropped a row whose endpoint did not yet exist — the MATCH
+    returned 0 rows and the relationship MERGE never fired. Within a
+    single batch this is safe (node MERGE runs first in the same tx), but
+    a cross-batch edge whose endpoint was supposed to land earlier and
+    never did was lost with no error, no DLQ, no metric (#33).
+
+    This builder uses ``OPTIONAL MATCH`` on both endpoints and a
+    ``FOREACH`` guard that only MERGEs the relationship when both sides
+    resolved. It returns two counts — the number of relationships merged
+    and the number of rows whose endpoint was missing. The caller
+    (``_merge_edges_tx``) raises ``EndpointMissingError`` when the missing
+    count is non-zero, so the silent-skip becomes a loud DLQ.
+
+    Coalesce-clear contract (per SET line) — same as ``_build_node_cypher``:
 
     - field omitted from ``row.props``  → preserve existing value
     - field present with explicit null  → preserve existing value (silent no-op)
@@ -321,15 +359,24 @@ def _build_edge_cypher(label: str) -> str:
     Edge properties cannot be cleared via an ingest batch (see #23).
     """
     fields = EDGE_PROPERTY_MAP.get(label, [])
-    set_lines = ",\n    ".join(f"r.{f} = coalesce(row.props.{f}, r.{f})" for f in fields)
-    set_clause = f"SET {set_lines}\n" if fields else ""
+    # SET stanzas run inside the FOREACH guard, so they reference the
+    # relationship bound there (``r``) and the per-row ``row`` captured by
+    # the surrounding UNWIND.
+    set_lines = ",\n        ".join(f"r.{f} = coalesce(row.props.{f}, r.{f})" for f in fields)
+    set_clause = f"\n        SET {set_lines}" if fields else ""
     return (
         "UNWIND $rows AS row\n"
-        "MATCH (s {id: row.src_id})\n"
-        "MATCH (t {id: row.dst_id})\n"
-        f"MERGE (s)-[r:`{label}`]->(t)\n"
-        f"{set_clause}"
-        "RETURN count(r) AS merged"
+        "OPTIONAL MATCH (s {id: row.src_id})\n"
+        "OPTIONAL MATCH (t {id: row.dst_id})\n"
+        # FOREACH over a 1- or 0-element list: the relationship MERGE runs
+        # only when BOTH endpoints resolved. A missing endpoint leaves the
+        # list empty so nothing is created — and we count it below.
+        "FOREACH (_ IN CASE WHEN s IS NOT NULL AND t IS NOT NULL THEN [1] ELSE [] END |\n"
+        f"    MERGE (s)-[r:`{label}`]->(t){set_clause}\n"
+        ")\n"
+        "RETURN\n"
+        "  count(CASE WHEN s IS NOT NULL AND t IS NOT NULL THEN 1 END) AS merged,\n"
+        "  count(CASE WHEN s IS NULL OR t IS NULL THEN 1 END) AS skipped"
     )
 
 
@@ -341,10 +388,58 @@ def _merge_nodes_tx(tx: ManagedTransaction, *, label: str, rows: list[dict[str, 
 
 
 def _merge_edges_tx(tx: ManagedTransaction, *, label: str, rows: list[dict[str, Any]]) -> int:
+    """MERGE one edge label's rows; fail loud on any missing endpoint.
+
+    The edge Cypher (see ``_build_edge_cypher``) returns both the merged
+    count and a ``skipped`` count of rows whose ``src_id``/``dst_id`` did
+    not resolve to a node in the graph. Per #22 acceptance a missing
+    endpoint must fail loud, so any non-zero ``skipped`` raises
+    ``EndpointMissingError`` — the runner then DLQs the whole batch
+    rather than letting the edge data vanish silently (#33).
+    """
     query = _build_edge_cypher(label)
     result = tx.run(query, rows=rows)
     record = result.single()
-    return int(record["merged"]) if record else 0
+    if record is None:
+        return 0
+    skipped = int(record["skipped"]) if record["skipped"] is not None else 0
+    if skipped:
+        missing = _missing_endpoint_ids(rows)
+        _logger.error(
+            "ingest_edge_endpoint_missing",
+            edge_label=label,
+            skipped=skipped,
+            total=len(rows),
+            missing_endpoints=missing,
+        )
+        msg = (
+            f"{label}: {skipped} of {len(rows)} edge row(s) reference an "
+            f"endpoint absent from the graph at MERGE time "
+            f"(missing node ids: {missing}); failing loud per #22 acceptance"
+        )
+        raise EndpointMissingError(msg)
+    return int(record["merged"]) if record["merged"] is not None else 0
+
+
+def _missing_endpoint_ids(rows: list[dict[str, Any]]) -> list[str]:
+    """Collect the distinct endpoint ids referenced by the edge rows.
+
+    Used only to build the ``EndpointMissingError`` message / log line.
+    The Cypher already determined *that* an endpoint was missing; without
+    a second round-trip we cannot know exactly which ids were absent, so
+    we surface every endpoint id in the failing batch (capped) as the
+    operator's starting point for the bring-up audit. Bounded to keep the
+    DLQ record and log line from ballooning on a large batch.
+    """
+    seen: list[str] = []
+    for row in rows:
+        for key in ("src_id", "dst_id"):
+            value = row.get(key)
+            if isinstance(value, str) and value not in seen:
+                seen.append(value)
+                if len(seen) >= 20:  # noqa: PLR2004 — log/message cap, not a domain constant
+                    return seen
+    return seen
 
 
 # ---------------------------------------------------------------------------
