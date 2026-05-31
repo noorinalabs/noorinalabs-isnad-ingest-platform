@@ -220,6 +220,37 @@ make check                  # lint + typecheck + unit suite
 The test suite uses in-memory fakes for Kafka and S3 — `tests/workers/`
 runs without any container. Use this for the inner loop.
 
+#### Integration test plan (Docker-gated, runtime-verified)
+
+`tests/integration/` holds the `@pytest.mark.integration` suite. CI runs
+`pytest -m "not integration"`, so these are **skipped by design without
+Docker** and must be run on a Docker-capable host. They are the live
+verification for contracts the in-memory fakes cannot exercise (#55):
+
+| Module | Containers | What it verifies |
+|--------|-----------|------------------|
+| `test_kafka_worker_e2e.py` | Kafka + MinIO + Neo4j | A batch flows enrich → normalize → ingest **across real Kafka topics** (`pipeline.dedup.done` → `pipeline.enrich.done` → `pipeline.normalize.done`); terminal ingest MERGEs the Hadith node into Neo4j. Also drives each `workers/<stage>/main.py` `build_runner()` against live infra (ingest runs `verify_connectivity()`). |
+| `test_minio_dedup_object_store.py` | MinIO | `object_store.py` (real boto3) drives the dedup pass-through `get_object` (seekable spool) → `copy_object` → `put_object` round-trip against a live MinIO bucket — previously only covered via `FakeS3Client`. |
+
+Run them on a host with a running Docker daemon:
+
+```bash
+# Whole integration suite (Neo4j + Postgres + Kafka + MinIO as needed):
+make test-integration
+
+# Just the #55 gap coverage:
+ENVIRONMENT=test uv run pytest tests/integration/test_kafka_worker_e2e.py \
+    tests/integration/test_minio_dedup_object_store.py -v -m integration
+```
+
+The Kafka E2E test starts **three** containers and is the heaviest in the
+suite; budget a couple of minutes for first-run image pulls. ML deps
+(`sentence-transformers` / `transformers`) are NOT required — the enrich and
+dedup stages exercise their documented graceful-degradation paths, so the
+object-store and Kafka contracts are verified without the ML group. Reset-CLI
+against real Kafka/S3 (vs the current fakes) is a tracked follow-up, not part
+of this suite.
+
 ### Lint and format
 
 ```bash
