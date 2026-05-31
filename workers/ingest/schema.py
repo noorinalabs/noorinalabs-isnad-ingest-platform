@@ -1,6 +1,6 @@
 """Per-label property allow-lists for ingest MERGE.
 
-Closes Farhan's Phase-4 safety flag (#192): the old ingest implementation
+Closes Farhan's Phase-4 safety flag: the old ingest implementation
 used ``SET n += row.props`` which lets an attacker-controlled property
 key (``:label``, ``id``, a future scholar-curated field not present in
 this batch) overwrite or subvert the node. This module enumerates the
