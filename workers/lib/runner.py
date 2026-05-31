@@ -126,10 +126,19 @@ class WorkerRunner:
             return
 
         self.metrics.records_processed(msg.record_count, batch_id=msg.batch_id)
-        self.checkpoint.mark(msg.batch_id)
 
+        # Send-before-mark ordering (#43). The checkpoint must only record a
+        # batch as processed AFTER its downstream message has been handed to
+        # the producer. The reverse order loses the downstream message if
+        # ``producer.send`` raises after ``mark`` commits: on restart the
+        # batch_id reads as seen and the message is silently skipped forever.
+        # If ``send`` raises here, we do NOT mark — the batch is reprocessed
+        # and re-sent on restart, which downstream consumers absorb via their
+        # own idempotency scope (a re-send is safe; a lost message is not).
         if next_msg is not None and self.settings.produce_topic is not None:
             self.producer.send(self.settings.produce_topic, serialize_message(next_msg))
+
+        self.checkpoint.mark(msg.batch_id)
 
     def run_forever(self, *, stop: Callable[[], bool] | None = None) -> None:
         """Consume indefinitely. ``stop`` is a hook the tests use to break the loop."""

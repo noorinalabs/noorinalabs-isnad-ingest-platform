@@ -4,10 +4,32 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests.workers.conftest import FakeConsumer, FakeProducer
+from tests.workers.test_checkpoint_pg import _FakePgConnection
+from workers.lib.checkpoint_pg import PgCheckpoint
 from workers.lib.dlq import DLQ_TOPIC
 from workers.lib.message import PipelineMessage, parse_message, serialize_message
-from workers.lib.runner import WorkerRunner, WorkerSettings
+from workers.lib.runner import InMemoryCheckpoint, WorkerRunner, WorkerSettings
+
+
+class _SendFailsProducer(FakeProducer):
+    """Producer whose downstream ``send`` raises, simulating broker
+    unavailability / queue-full in the mark/send window (#43).
+
+    DLQ sends still succeed so the failure is isolated to the
+    next-stage publish path.
+    """
+
+    def __init__(self, *, failing_topic: str) -> None:
+        super().__init__()
+        self._failing_topic = failing_topic
+
+    def send(self, topic: str, value: bytes) -> None:
+        if topic == self._failing_topic:
+            raise RuntimeError("broker unavailable")
+        super().send(topic, value)
 
 
 def _settings() -> WorkerSettings:
@@ -129,3 +151,90 @@ def test_no_produce_when_produce_topic_is_none(sample_message: PipelineMessage) 
     runner.handle_one(serialize_message(sample_message))
 
     assert producer.sent == []
+
+
+def test_send_failure_after_mark_does_not_record_checkpoint_inmemory(
+    sample_message: PipelineMessage,
+) -> None:
+    """Regression for #43: if ``producer.send`` raises, the batch must NOT
+    be marked, so a restart reprocesses and re-sends it instead of silently
+    skipping a lost downstream message.
+
+    Covers the default ``InMemoryCheckpoint`` path.
+    """
+    producer = _SendFailsProducer(failing_topic="out")
+    checkpoint = InMemoryCheckpoint()
+
+    def process(msg: PipelineMessage) -> PipelineMessage:
+        return msg.to_next_stage(b2_path="dedup/x.parquet")
+
+    runner = WorkerRunner(
+        settings=_settings(),
+        consumer=FakeConsumer([]),
+        producer=producer,
+        process=process,
+        checkpoint=checkpoint,
+    )
+
+    # The send raises out of handle_one — the batch was not successfully
+    # produced, so it must not be recorded as processed.
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        runner.handle_one(serialize_message(sample_message))
+
+    assert checkpoint.seen(sample_message.batch_id) is False
+    assert producer.sent == []  # nothing landed downstream
+
+
+def test_send_failure_after_mark_does_not_record_checkpoint_pg(
+    sample_message: PipelineMessage,
+) -> None:
+    """Regression for #43 on the durable ``PgCheckpoint`` path.
+
+    A mark-before-send ordering would leave a permanent row in
+    ``pipeline.worker_checkpoint`` for a batch that never produced its
+    downstream message — exactly the durable-loss this issue describes.
+    """
+    producer = _SendFailsProducer(failing_topic="out")
+    conn = _FakePgConnection()
+    checkpoint = PgCheckpoint(conn=conn, stage="dedup-worker")
+
+    def process(msg: PipelineMessage) -> PipelineMessage:
+        return msg.to_next_stage(b2_path="dedup/x.parquet")
+
+    runner = WorkerRunner(
+        settings=_settings(),
+        consumer=FakeConsumer([]),
+        producer=producer,
+        process=process,
+        checkpoint=checkpoint,
+    )
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        runner.handle_one(serialize_message(sample_message))
+
+    assert checkpoint.seen(sample_message.batch_id) is False
+    assert producer.sent == []
+
+
+def test_successful_send_then_marks_checkpoint(
+    sample_message: PipelineMessage,
+) -> None:
+    """The happy path still marks: send succeeds, then the batch is recorded
+    so a redelivery is correctly skipped."""
+    producer = FakeProducer()
+    checkpoint = InMemoryCheckpoint()
+
+    def process(msg: PipelineMessage) -> PipelineMessage:
+        return msg.to_next_stage(b2_path="dedup/x.parquet")
+
+    runner = WorkerRunner(
+        settings=_settings(),
+        consumer=FakeConsumer([]),
+        producer=producer,
+        process=process,
+        checkpoint=checkpoint,
+    )
+    runner.handle_one(serialize_message(sample_message))
+
+    assert checkpoint.seen(sample_message.batch_id) is True
+    assert len(producer.sent) == 1

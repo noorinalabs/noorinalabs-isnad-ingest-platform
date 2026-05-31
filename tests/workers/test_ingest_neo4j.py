@@ -2,7 +2,9 @@
 
 The tests mock the neo4j driver/session so the suite runs without
 Docker or a live database. Integration coverage against a real Neo4j
-(testcontainers) is tracked separately in issue #38.
+(testcontainers) — the wall-clock retry bound and DLQ-on-exhaustion
+contract these fakes cannot exercise — lives in
+``tests/integration/test_ingest_neo4j_wall_clock.py`` (issue #38).
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import pytest
 
 from tests.workers.conftest import FakeConsumer, FakeProducer
 from workers.ingest.processor import (
+    EndpointMissingError,
     IngestProcessor,
     ManifestMissingError,
     UnknownSchemaError,
@@ -44,13 +47,47 @@ class _FakeResult:
 
 
 class _FakeTx:
-    def __init__(self, sink: list[tuple[str, dict[str, Any]]]) -> None:
+    """Records every ``tx.run`` and simulates the node/edge MERGE result shape.
+
+    Node MERGEs return ``{"merged": <row count>}``. Edge MERGEs use the
+    fail-loud ``OPTIONAL MATCH`` Cypher and return both ``merged`` and
+    ``skipped`` — the fake emulates the OPTIONAL MATCH by treating an
+    endpoint as present only if its id is in ``known_ids``. Node MERGEs
+    seen earlier in the same transaction add their ids to ``known_ids``,
+    mirroring the same-session "nodes first" ordering contract so the
+    happy path resolves every endpoint.
+    """
+
+    def __init__(
+        self,
+        sink: list[tuple[str, dict[str, Any]]],
+        *,
+        known_ids: set[str] | None = None,
+    ) -> None:
         self._sink = sink
+        # Endpoints resolvable by the simulated OPTIONAL MATCH. Seeded by
+        # the caller (cross-batch absent-endpoint tests) and grown by node
+        # MERGEs run earlier in this transaction (within-batch happy path).
+        self._known_ids: set[str] = set(known_ids or set())
 
     def run(self, query: str, **params: Any) -> _FakeResult:
         self._sink.append((query, params))
         rows = params.get("rows") or []
-        return _FakeResult({"merged": len(rows)})
+        is_edge = "MERGE (s)-[r:" in query
+        if not is_edge:
+            for row in rows:
+                row_id = row.get("id")
+                if isinstance(row_id, str):
+                    self._known_ids.add(row_id)
+            return _FakeResult({"merged": len(rows)})
+        merged = 0
+        skipped = 0
+        for row in rows:
+            if row.get("src_id") in self._known_ids and row.get("dst_id") in self._known_ids:
+                merged += 1
+            else:
+                skipped += 1
+        return _FakeResult({"merged": merged, "skipped": skipped})
 
 
 class _FakeSession:
@@ -59,9 +96,13 @@ class _FakeSession:
         sink: list[tuple[str, dict[str, Any]]],
         *,
         raise_on_execute: Exception | None = None,
+        known_ids: set[str] | None = None,
     ) -> None:
         self._sink = sink
         self._raise = raise_on_execute
+        # Pre-existing graph node ids the simulated OPTIONAL MATCH resolves
+        # for edge endpoints, on top of whatever nodes this batch MERGEs.
+        self._known_ids = known_ids
 
     def __enter__(self) -> _FakeSession:
         return self
@@ -74,16 +115,24 @@ class _FakeSession:
             err = self._raise
             self._raise = None  # one-shot: subsequent calls succeed
             raise err
-        tx = _FakeTx(self._sink)
+        tx = _FakeTx(self._sink, known_ids=self._known_ids)
         return fn(tx, **kwargs)
 
 
 class _FakeDriver:
-    def __init__(self, *, session_factories: list[_FakeSession] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        session_factories: list[_FakeSession] | None = None,
+        known_ids: set[str] | None = None,
+    ) -> None:
         self.sink: list[tuple[str, dict[str, Any]]] = []
         self.closed = False
         self._factories = session_factories or []
         self._next_factory = 0
+        # Graph node ids present before this batch (cross-batch endpoint
+        # tests seed pre-existing nodes here).
+        self._known_ids = known_ids
 
     def session(self) -> _FakeSession:
         if self._factories:
@@ -94,7 +143,7 @@ class _FakeDriver:
             self._next_factory += 1
             sess._sink = self.sink  # share recording sink
             return sess
-        return _FakeSession(self.sink)
+        return _FakeSession(self.sink, known_ids=self._known_ids)
 
     def close(self) -> None:
         self.closed = True
@@ -251,11 +300,23 @@ def test_node_cypher_for_empty_allowlist_has_no_set() -> None:
     assert "SET" not in query
 
 
-def test_edge_cypher_matches_endpoints_then_merges() -> None:
+def test_edge_cypher_optional_matches_endpoints_and_counts_skips() -> None:
+    """#33: edge Cypher OPTIONAL MATCHes endpoints and reports skips, not silent.
+
+    A bare ``MATCH`` would drop a row with a missing endpoint with zero
+    telemetry; the fail-loud contract requires OPTIONAL MATCH plus a
+    ``skipped`` count the caller can raise on.
+    """
     query = _build_edge_cypher("TRANSMITTED_TO")
-    assert "MATCH (s {id: row.src_id})" in query
-    assert "MATCH (t {id: row.dst_id})" in query
+    assert "OPTIONAL MATCH (s {id: row.src_id})" in query
+    assert "OPTIONAL MATCH (t {id: row.dst_id})" in query
     assert "MERGE (s)-[r:`TRANSMITTED_TO`]->(t)" in query
+    # The MERGE is guarded so it only fires when both endpoints resolved.
+    assert "FOREACH" in query
+    assert "WHEN s IS NOT NULL AND t IS NOT NULL" in query
+    # Both counts are returned so the caller can fail loud on a skip.
+    assert "AS merged" in query
+    assert "AS skipped" in query
     assert (
         "r.position_in_chain = coalesce(row.props.position_in_chain, r.position_in_chain)" in query
     )
@@ -459,6 +520,127 @@ def test_unknown_edge_label_in_batch_raises_schema_error(
 
 
 # ---------------------------------------------------------------------------
+# #33 — edge endpoint missing must fail loud (per #22 acceptance)
+# ---------------------------------------------------------------------------
+
+
+def test_edge_with_missing_endpoint_in_batch_fails_loud(
+    object_store: ObjectStore, folder_prefix_message: PipelineMessage
+) -> None:
+    """An edge whose endpoint never lands in the graph must raise, not skip.
+
+    #22 acceptance: *"endpoint missing (both src_id and dst_id must exist
+    — MERGE on node first or fail loud)"*. Here ``nar:b`` is referenced by
+    the edge but is absent from both this batch's node MERGEs and the
+    pre-existing graph, so the OPTIONAL MATCH leaves ``t`` null and the
+    relationship MERGE cannot fire. Old behavior: silent skip, data lost.
+    New behavior: ``EndpointMissingError`` → DLQ.
+    """
+    _write_batch(
+        object_store,
+        folder_prefix_message.b2_path,
+        nodes={"Narrator": [{"id": "nar:a", "props": {"name_en": "A"}}]},
+        edges=[
+            {
+                "label": "TRANSMITTED_TO",
+                "src_id": "nar:a",
+                "src_label": "Narrator",
+                "dst_id": "nar:b",  # never MERGEd as a node, not pre-existing
+                "dst_label": "Narrator",
+                "props": {"position_in_chain": 0},
+            }
+        ],
+    )
+    driver = _FakeDriver()
+
+    with pytest.raises(EndpointMissingError, match="endpoint absent from the graph"):
+        IngestProcessor(object_store, neo4j_driver=driver)(folder_prefix_message)
+    # EndpointMissingError is a subclass of UnknownSchemaError so the
+    # runner's existing schema-error branch DLQs it.
+    assert issubclass(EndpointMissingError, UnknownSchemaError)
+    # The missing endpoint id appears in the loud failure message.
+    with pytest.raises(EndpointMissingError, match="nar:b"):
+        IngestProcessor(object_store, neo4j_driver=driver)(folder_prefix_message)
+
+
+def test_edge_with_endpoint_in_prior_batch_present_merges_cleanly(
+    object_store: ObjectStore, folder_prefix_message: PipelineMessage
+) -> None:
+    """The cross-batch happy path: endpoint landed in a prior batch.
+
+    The destination node ``nar:b`` is NOT in this batch's node MERGEs but
+    IS pre-existing in the graph (seeded via the driver's ``known_ids``).
+    The OPTIONAL MATCH resolves both endpoints, so the edge MERGEs and no
+    EndpointMissingError fires — proving the fail-loud path keys on
+    *graph presence*, not *this-batch presence*.
+    """
+    _write_batch(
+        object_store,
+        folder_prefix_message.b2_path,
+        nodes={"Narrator": [{"id": "nar:a", "props": {"name_en": "A"}}]},
+        edges=[
+            {
+                "label": "TRANSMITTED_TO",
+                "src_id": "nar:a",
+                "src_label": "Narrator",
+                "dst_id": "nar:b",
+                "dst_label": "Narrator",
+                "props": {"position_in_chain": 0},
+            }
+        ],
+    )
+    driver = _FakeDriver(known_ids={"nar:b"})  # nar:b landed in a prior batch
+
+    # No exception — the edge resolves both endpoints.
+    IngestProcessor(object_store, neo4j_driver=driver)(folder_prefix_message)
+
+    edge_calls = [(q, p) for q, p in driver.sink if "MERGE (s)-[r:" in q]
+    assert len(edge_calls) == 1
+
+
+def test_runner_routes_missing_endpoint_to_dlq(
+    object_store: ObjectStore, folder_prefix_message: PipelineMessage
+) -> None:
+    """#33: a missing-endpoint edge is DLQ'd, not silently dropped."""
+    _write_batch(
+        object_store,
+        folder_prefix_message.b2_path,
+        nodes={"Narrator": [{"id": "nar:a", "props": {"name_en": "A"}}]},
+        edges=[
+            {
+                "label": "TRANSMITTED_TO",
+                "src_id": "nar:a",
+                "src_label": "Narrator",
+                "dst_id": "nar:ghost",  # never lands
+                "dst_label": "Narrator",
+                "props": {},
+            }
+        ],
+    )
+    driver = _FakeDriver()
+    producer = FakeProducer()
+
+    runner = WorkerRunner(
+        settings=WorkerSettings(
+            worker_name="ingest-worker",
+            consume_topic=PIPELINE_NORMALIZE_DONE,
+            produce_topic=None,
+            consumer_group="ingest-worker",
+        ),
+        consumer=FakeConsumer([]),
+        producer=producer,
+        process=IngestProcessor(object_store, neo4j_driver=driver),
+    )
+    runner.handle_one(serialize_message(folder_prefix_message))
+
+    assert len(producer.sent) == 1
+    topic, value = producer.sent[0]
+    assert topic == DLQ_TOPIC
+    record = json.loads(value)
+    assert record["error_class"] == "EndpointMissingError"
+
+
+# ---------------------------------------------------------------------------
 # Phase-4 safety — per-field SET semantics
 # ---------------------------------------------------------------------------
 
@@ -556,7 +738,8 @@ def test_ingest_session_expired_propagates_to_dlq(
     by raising directly from ``execute_write``; this asserts the *wire
     contract* (one session opened, exception propagates) but does NOT
     exercise the driver's wall-clock bound. That requires a real Neo4j
-    (testcontainers, issue #38 integration suite).
+    (testcontainers) and lives in
+    ``tests/integration/test_ingest_neo4j_wall_clock.py`` (issue #38).
     """
     from neo4j.exceptions import SessionExpired
 

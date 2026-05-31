@@ -224,9 +224,12 @@ def _fan_out_row(row: dict[str, Any]) -> tuple[list[_NodeRow], list[_EdgeRow]]:
                 "source_corpus": source_corpus,
                 "sect": sect,
                 "collection_name": collection_name,
-                "book_number": row.get("book_number"),
-                "chapter_number": row.get("chapter_number"),
-                "hadith_number": row.get("hadith_number"),
+                # book_number / chapter_number / hadith_number are no longer
+                # emitted onto the Hadith node (#35 ruling): they are
+                # per-appearance facts carried on the APPEARS_IN edge below,
+                # and no consumer reads them off the node. The ingest
+                # allow-list also dropped them; stopping the emission here
+                # avoids a per-batch "dropped unknown prop" warning.
                 "chapter_name_ar": row.get("chapter_name_ar"),
                 "chapter_name_en": row.get("chapter_name_en"),
             },
@@ -252,7 +255,11 @@ def _fan_out_row(row: dict[str, Any]) -> tuple[list[_NodeRow], list[_EdgeRow]]:
             props={
                 "book_number": row.get("book_number"),
                 "chapter_number": row.get("chapter_number"),
-                "hadith_number": row.get("hadith_number"),
+                # Canonicalized to the modeled name (#35 ruling): the
+                # AppearsIn model field is hadith_number_in_book, so emit
+                # under that key and drop the bare legacy hadith_number.
+                # Source column stays hadith_number (feeds the edge).
+                "hadith_number_in_book": row.get("hadith_number"),
             },
         ),
     ]

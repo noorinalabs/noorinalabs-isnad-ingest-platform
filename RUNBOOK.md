@@ -22,9 +22,10 @@ relevant.
 4. [Deploy procedure](#deploy-procedure)
 5. [Rollback](#rollback)
 6. [Common-failure triage](#common-failure-triage)
-7. [On-call escalation](#on-call-escalation)
-8. [References](#references)
-9. [Known gaps and carry-forwards](#known-gaps-and-carry-forwards)
+7. [Maintenance](#maintenance)
+8. [On-call escalation](#on-call-escalation)
+9. [References](#references)
+10. [Known gaps and carry-forwards](#known-gaps-and-carry-forwards)
 
 ---
 
@@ -218,6 +219,37 @@ make check                  # lint + typecheck + unit suite
 
 The test suite uses in-memory fakes for Kafka and S3 — `tests/workers/`
 runs without any container. Use this for the inner loop.
+
+#### Integration test plan (Docker-gated, runtime-verified)
+
+`tests/integration/` holds the `@pytest.mark.integration` suite. CI runs
+`pytest -m "not integration"`, so these are **skipped by design without
+Docker** and must be run on a Docker-capable host. They are the live
+verification for contracts the in-memory fakes cannot exercise (#55):
+
+| Module | Containers | What it verifies |
+|--------|-----------|------------------|
+| `test_kafka_worker_e2e.py` | Kafka + MinIO + Neo4j | A batch flows enrich → normalize → ingest **across real Kafka topics** (`pipeline.dedup.done` → `pipeline.enrich.done` → `pipeline.normalize.done`); terminal ingest MERGEs the Hadith node into Neo4j. Also drives each `workers/<stage>/main.py` `build_runner()` against live infra (ingest runs `verify_connectivity()`). |
+| `test_minio_dedup_object_store.py` | MinIO | `object_store.py` (real boto3) drives the dedup pass-through `get_object` (seekable spool) → `copy_object` → `put_object` round-trip against a live MinIO bucket — previously only covered via `FakeS3Client`. |
+
+Run them on a host with a running Docker daemon:
+
+```bash
+# Whole integration suite (Neo4j + Postgres + Kafka + MinIO as needed):
+make test-integration
+
+# Just the #55 gap coverage:
+ENVIRONMENT=test uv run pytest tests/integration/test_kafka_worker_e2e.py \
+    tests/integration/test_minio_dedup_object_store.py -v -m integration
+```
+
+The Kafka E2E test starts **three** containers and is the heaviest in the
+suite; budget a couple of minutes for first-run image pulls. ML deps
+(`sentence-transformers` / `transformers`) are NOT required — the enrich and
+dedup stages exercise their documented graceful-degradation paths, so the
+object-store and Kafka contracts are verified without the ML group. Reset-CLI
+against real Kafka/S3 (vs the current fakes) is a tracked follow-up, not part
+of this suite.
 
 ### Lint and format
 
@@ -448,6 +480,54 @@ If MinIO is responsive but `403`s:
 - `S3_ENDPOINT_URL` pointing at the wrong host (MinIO is HTTP not
   HTTPS in local dev).
 - Bucket policy missing — should be unrestricted for the dev creds.
+
+---
+
+## Maintenance
+
+### worker_checkpoint TTL sweep
+
+`PgCheckpoint` (the `pg` checkpoint backend) writes one row per
+`(stage, batch_id)` into `pipeline.worker_checkpoint`. At the expected
+steady-state rate (~10k batches/day × 7-day Kafka retention ≈ 70k rows)
+the `worker_checkpoint_marked_at_idx` stays trivially small and **no
+sweep is needed**. The sweep exists for the cases that break that
+assumption:
+
+- sustained throughput rise (e.g. >100k batches/day),
+- Kafka retention extended beyond 7 days, or
+- a backfill/replay row spike that doesn't age out naturally.
+
+`PgCheckpoint.sweep()` is the mechanism. It is a **no-op until a stage's
+row count exceeds the threshold**; once over, it deletes rows older than
+the retention window and returns the number deleted. It is safe to call
+on every worker tick or from an external scheduler — below threshold it
+costs a single `count(*)`.
+
+**Ops surface:** the sweep is a method, not a deployed job — wiring it to
+a cron / k8s `CronJob` / scheduler tick is a deploy-side choice tracked
+in `noorinalabs-deploy` (it owns the Postgres runtime). Call
+`build_checkpoint(stage).sweep()` from whichever scheduler the cutover
+picks; the method has no scheduler assumptions baked in.
+
+**Tuning** (env, read at `PgCheckpoint` construction — change without a
+code edit):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `INGEST_CHECKPOINT_RETENTION_DAYS` | `14` | Delete rows older than this. Default = 7-day Kafka retention + 1-week safety margin. Raise it if Kafka retention is extended. |
+| `INGEST_CHECKPOINT_SWEEP_THRESHOLD_ROWS` | `100000` | Per-stage row count below which the sweep is a no-op. Raise it to suppress sweeps at higher steady-state; lower it to sweep more eagerly. |
+
+A blank or unparseable value falls back to the default (logged as
+`checkpoint_env_int_invalid`) rather than crashing the worker.
+
+**Observability:** every `sweep()` emits a `checkpoint_sweep` structured
+log with `deleted`, the pre-sweep `row_count`, the active `threshold_rows`
+/ `retention_days`, and a `swept` boolean. Alert on **`swept=true` with
+`deleted=0`** (or a `row_count` that keeps climbing across ticks) — that
+means rows are accumulating faster than the retention window evicts them,
+i.e. retention is mis-tuned for the current throughput and the window or
+threshold needs revisiting per the table above.
 
 ---
 

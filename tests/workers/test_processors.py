@@ -488,6 +488,52 @@ class TestNormalizeProcessor:
         assert len(hadiths) == 1
         assert hadiths[0]["props"]["collection_name"] == "bukhari"
 
+    def test_hadith_node_omits_per_appearance_fields_per_issue_35(
+        self,
+        object_store: ObjectStore,
+        sample_message: PipelineMessage,
+        hadith_row: Any,
+    ) -> None:
+        """#35 ruling: book/chapter/hadith number are per-appearance facts.
+
+        They are no longer emitted onto the Hadith node (removed from the
+        ingest NODE allow-list; no query/API/frontend consumer reads them
+        off the node). They live on the APPEARS_IN edge instead, and the
+        edge carries the modeled name ``hadith_number_in_book`` rather than
+        the bare legacy ``hadith_number``.
+        """
+        row = hadith_row(source_id="h1", matn_en="text", collection_name="bukhari")
+        row["book_number"] = 3
+        row["chapter_number"] = 7
+        row["hadith_number"] = 42
+        _seed(object_store, sample_message.b2_path, build_hadith_parquet([row]))
+
+        nxt = NormalizeProcessor(object_store)(sample_message)
+
+        # Node side: none of the three per-appearance fields on the Hadith node.
+        hadiths = self._read_nodes(object_store, nxt.b2_path, "hadiths.parquet")
+        assert len(hadiths) == 1
+        node_props = hadiths[0]["props"]
+        for removed in ("book_number", "chapter_number", "hadith_number"):
+            assert removed not in node_props, f"{removed} must not be on the Hadith node"
+
+        # Edge side: APPEARS_IN keeps book/chapter and uses the canonical
+        # ``hadith_number_in_book`` key, not the bare ``hadith_number``.
+        edges_table = pq.read_table(object_store.get_object(f"{nxt.b2_path}edges.parquet"))
+        edge_rows = edges_table.to_pylist()
+        appears = [
+            {**e, "props": json.loads(e["props"])} for e in edge_rows if e["label"] == "APPEARS_IN"
+        ]
+        assert len(appears) == 1
+        edge_props = appears[0]["props"]
+        assert edge_props.get("book_number") == 3
+        assert edge_props.get("chapter_number") == 7
+        assert edge_props.get("hadith_number_in_book") == 42
+        assert "hadith_number" not in edge_props, (
+            "APPEARS_IN must use the canonical hadith_number_in_book, "
+            "not the bare legacy hadith_number"
+        )
+
     def test_missing_required_column_raises(
         self,
         object_store: ObjectStore,
