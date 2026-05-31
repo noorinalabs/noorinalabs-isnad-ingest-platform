@@ -4,6 +4,20 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Type-only imports for the reset-adapter contract. ``src.pipeline.reset``
+    # is import-light (only ``src.pipeline.audit``), so even a runtime import
+    # would be safe — but keeping these under TYPE_CHECKING preserves cli.py's
+    # function-local-import discipline (no module-level kafka/neo4j/boto3) and
+    # costs nothing thanks to ``from __future__ import annotations``.
+    from src.pipeline.reset import (
+        KafkaAdmin,
+        Neo4jResetter,
+        PgResetter,
+        _ObjectStoreProto,
+    )
 
 
 def _mask_password(value: str) -> str:
@@ -458,10 +472,10 @@ def _cmd_reset(
     object_store, kafka_admin, neo4j, pg = _build_reset_clients(settings)
 
     resetter = PipelineResetter(
-        object_store=object_store,  # type: ignore[arg-type]
-        kafka_admin=kafka_admin,  # type: ignore[arg-type]
-        neo4j=neo4j,  # type: ignore[arg-type]
-        pg=pg,  # type: ignore[arg-type]
+        object_store=object_store,
+        kafka_admin=kafka_admin,
+        neo4j=neo4j,
+        pg=pg,
         data_dir=data_dir,
     )
     report, _entry, audit_path = resetter.reset(scope, confirmation_method=confirmation_method)
@@ -478,8 +492,16 @@ def _cmd_reset(
     print(f"  Audit entry        : {audit_path}")
 
 
-def _build_reset_clients(settings: object) -> tuple[object, object, object, object]:
-    """Construct the four reset adapters from settings. Isolated for testability."""
+def _build_reset_clients(
+    settings: object,
+) -> tuple[_ObjectStoreProto, KafkaAdmin, Neo4jResetter, PgResetter]:
+    """Construct the four reset adapters from settings. Isolated for testability.
+
+    The return type is the protocol contract that ``PipelineResetter.__init__``
+    expects, so the four call-site adapters type-check without ``# type: ignore``.
+    The concrete SDK imports stay inside the body (test-isolation invariant); the
+    protocol types are import-light and only referenced as annotations.
+    """
     # Imports kept inside the helper so unit tests that call _cmd_reset
     # via monkey-patched adapters don't drag in kafka/neo4j/boto3.
     import os
