@@ -81,9 +81,12 @@ NODE_PROPERTY_MAP: dict[str, list[str]] = {
         "source_corpus",
         "sect",
         "collection_name",
-        "book_number",
-        "chapter_number",
-        "hadith_number",
+        # book_number / chapter_number / hadith_number removed from the
+        # Hadith node allow-list per the #35 data-team ruling: these are
+        # per-appearance facts the model carries on the APPEARS_IN edge,
+        # never read off the Hadith node by any query/API/frontend
+        # consumer (verified org-wide at #35 execution time). The edge
+        # keeps them (see EDGE_PROPERTY_MAP["APPEARS_IN"]).
         "chapter_name_ar",
         "chapter_name_en",
     ],
@@ -190,7 +193,10 @@ EDGE_PROPERTY_MAP: dict[str, list[str]] = {
     "APPEARS_IN": [
         "book_number",
         "chapter_number",
-        "hadith_number",
+        # Canonicalized to the modeled name per the #35 ruling: the
+        # AppearsIn Pydantic model exposes hadith_number_in_book, so the
+        # bare legacy hadith_number is dropped from the edge allow-list
+        # (and from normalize's edge payload). Use hadith_number_in_book.
         "hadith_number_in_book",
     ],
     "STUDIED_UNDER": [
