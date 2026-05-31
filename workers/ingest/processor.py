@@ -1,12 +1,12 @@
 """ingest-worker processor — manifest-gated MERGE into Neo4j.
 
 Terminal stage. Consumes a pointer to a folder prefix written by the
-normalize worker (see ``workers/normalize/processor.py`` and #192
+normalize worker (see ``workers/normalize/processor.py``,
 Option D-ii) and MERGEs the per-label Parquets into Neo4j in a single
 retryable transaction: all node labels first, edges last.
 
-Design (issue #18, #192 D-ii)
------------------------------
+Design (issue #18, Option D-ii)
+-------------------------------
 * ``msg.b2_path`` is a folder prefix (e.g. ``normalized/<batch_id>/``).
   Ingest reads ``_MANIFEST.json`` from that prefix as the ready signal;
   normalize writes the manifest LAST so its presence implies every
@@ -20,7 +20,7 @@ Design (issue #18, #192 D-ii)
 * Per-field enumerated SET. Each label has an allow-list in
   ``workers.ingest.schema.NODE_PROPERTY_MAP``; the generated Cypher
   SETs exactly those fields as ``n.field = row.props.field``. Closes
-  Farhan's #192 Phase-4 flag: ``SET n += row.props`` let an
+  Farhan's Phase-4 flag: ``SET n += row.props`` let an
   attacker-controlled property overwrite the node, and also wiped
   scholar-curated fields not present in the current batch.
 * Error taxonomy:
@@ -301,8 +301,8 @@ def _build_node_cypher(label: str) -> str:
     Each SET uses ``coalesce(row.props.<f>, n.<f>)`` so a row that omits
     a field does NOT wipe the existing node property — the scholar-
     curated ``text_ar`` on a hadith survives an ingest batch that only
-    carries ``text_en``. This is the core of Farhan's Phase-4 fix
-    (#192 comment thread).
+    carries ``text_en``. This is the core of Farhan's Phase-4 fix; see
+    #23 for the coalesce-clear contract this establishes.
 
     Coalesce-clear contract (per-field, applies to every SET line)
     --------------------------------------------------------------
