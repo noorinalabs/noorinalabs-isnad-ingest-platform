@@ -22,9 +22,10 @@ relevant.
 4. [Deploy procedure](#deploy-procedure)
 5. [Rollback](#rollback)
 6. [Common-failure triage](#common-failure-triage)
-7. [On-call escalation](#on-call-escalation)
-8. [References](#references)
-9. [Known gaps and carry-forwards](#known-gaps-and-carry-forwards)
+7. [Maintenance](#maintenance)
+8. [On-call escalation](#on-call-escalation)
+9. [References](#references)
+10. [Known gaps and carry-forwards](#known-gaps-and-carry-forwards)
 
 ---
 
@@ -448,6 +449,54 @@ If MinIO is responsive but `403`s:
 - `S3_ENDPOINT_URL` pointing at the wrong host (MinIO is HTTP not
   HTTPS in local dev).
 - Bucket policy missing — should be unrestricted for the dev creds.
+
+---
+
+## Maintenance
+
+### worker_checkpoint TTL sweep
+
+`PgCheckpoint` (the `pg` checkpoint backend) writes one row per
+`(stage, batch_id)` into `pipeline.worker_checkpoint`. At the expected
+steady-state rate (~10k batches/day × 7-day Kafka retention ≈ 70k rows)
+the `worker_checkpoint_marked_at_idx` stays trivially small and **no
+sweep is needed**. The sweep exists for the cases that break that
+assumption:
+
+- sustained throughput rise (e.g. >100k batches/day),
+- Kafka retention extended beyond 7 days, or
+- a backfill/replay row spike that doesn't age out naturally.
+
+`PgCheckpoint.sweep()` is the mechanism. It is a **no-op until a stage's
+row count exceeds the threshold**; once over, it deletes rows older than
+the retention window and returns the number deleted. It is safe to call
+on every worker tick or from an external scheduler — below threshold it
+costs a single `count(*)`.
+
+**Ops surface:** the sweep is a method, not a deployed job — wiring it to
+a cron / k8s `CronJob` / scheduler tick is a deploy-side choice tracked
+in `noorinalabs-deploy` (it owns the Postgres runtime). Call
+`build_checkpoint(stage).sweep()` from whichever scheduler the cutover
+picks; the method has no scheduler assumptions baked in.
+
+**Tuning** (env, read at `PgCheckpoint` construction — change without a
+code edit):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `INGEST_CHECKPOINT_RETENTION_DAYS` | `14` | Delete rows older than this. Default = 7-day Kafka retention + 1-week safety margin. Raise it if Kafka retention is extended. |
+| `INGEST_CHECKPOINT_SWEEP_THRESHOLD_ROWS` | `100000` | Per-stage row count below which the sweep is a no-op. Raise it to suppress sweeps at higher steady-state; lower it to sweep more eagerly. |
+
+A blank or unparseable value falls back to the default (logged as
+`checkpoint_env_int_invalid`) rather than crashing the worker.
+
+**Observability:** every `sweep()` emits a `checkpoint_sweep` structured
+log with `deleted`, the pre-sweep `row_count`, the active `threshold_rows`
+/ `retention_days`, and a `swept` boolean. Alert on **`swept=true` with
+`deleted=0`** (or a `row_count` that keeps climbing across ticks) — that
+means rows are accumulating faster than the retention window evicts them,
+i.e. retention is mis-tuned for the current throughput and the window or
+threshold needs revisiting per the table above.
 
 ---
 
