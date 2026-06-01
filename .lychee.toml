@@ -25,15 +25,18 @@ exclude = [
   # `../../../.claude/team/charter/<file>.md`. Those targets live in the parent
   # noorinalabs-main checkout, not in this child repo, so they resolve only when
   # the repos are nested under the parent. They are valid org-cross-refs, not
-  # broken links — exclude them rather than fail the gate.
-  '\.\./\.\./\.\./\.claude/team/charter/agents\.md$',
-  '\.\./\.\./\.\./\.claude/team/charter/branching\.md$',
-  '\.\./\.\./\.\./\.claude/team/charter/commits\.md$',
-  '\.\./\.\./\.\./\.claude/team/charter/communication\.md$',
-  '\.\./\.\./\.\./\.claude/team/charter/hooks\.md$',
-  '\.\./\.\./\.\./\.claude/team/charter/issues\.md$',
-  '\.\./\.\./\.\./\.claude/team/charter/pull-requests\.md$',
-  '\.\./\.\./\.\./\.claude/team/charter/tech-decisions\.md$',
+  # broken links — exclude them rather than fail the gate. lychee resolves the
+  # relative link to an absolute `file://` URL before matching `exclude`, so the
+  # patterns anchor on the resolved path SUFFIX (`/.claude/team/charter/<f>.md`),
+  # not the literal `../../../` relative form.
+  '/\.claude/team/charter/agents\.md$',
+  '/\.claude/team/charter/branching\.md$',
+  '/\.claude/team/charter/commits\.md$',
+  '/\.claude/team/charter/communication\.md$',
+  '/\.claude/team/charter/hooks\.md$',
+  '/\.claude/team/charter/issues\.md$',
+  '/\.claude/team/charter/pull-requests\.md$',
+  '/\.claude/team/charter/tech-decisions\.md$',
 ]
 
 # Skip generated/vendored trees.

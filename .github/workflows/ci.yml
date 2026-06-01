@@ -86,5 +86,9 @@ jobs:
           python-version: "3.12"
       - name: Pre-commit ⇄ CI sync-drift gate
         run: python3 .claude/lib/pre_commit_ci_sync.py .
+      - name: Install pytest for the gate's unit tests
+        # The gate itself is stdlib-only; its tests use pytest. This job does NOT
+        # `uv sync` (it does not need the project deps), so install pytest alone.
+        run: python3 -m pip install --quiet pytest
       - name: Sync-drift gate unit tests
         run: python3 -m pytest .claude/lib/tests/test_pre_commit_ci_sync.py -q
