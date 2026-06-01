@@ -365,8 +365,8 @@ If a bad batch poisoned a downstream topic, the operator can:
 **stage** (one stage prefix + downstream topics), **source** (all
 stages for one source), **full** (all B2 + all topics + Neo4j hadith
 data + PG hadith metadata; preserves user/auth/RBAC). The
-`obliterate` machinery itself is **carry-forward** under planned issue
-#108 — until that lands, treat full reset as a manual operator
+`obliterate` machinery itself is **carry-forward** under planned
+issue #108 — until that lands, treat full reset as a manual operator
 procedure to be designed during the cutover (do not improvise).
 
 ---

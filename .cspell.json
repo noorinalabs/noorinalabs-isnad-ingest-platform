@@ -1,0 +1,29 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "//": "Spellcheck for noorinalabs-isnad-ingest-platform authored docs (#326). Scoped to canonical authored prose (the team charter, RUNBOOK, workers README) — the append-only records (feedback_log, trust_matrix) and roster cards are excluded because they are dense with names, SHAs, and quoted shell that would balloon the dictionary without catching real typos. Domain vocabulary and team names live in project-words.txt.",
+  "dictionaryDefinitions": [
+    {
+      "name": "project-words",
+      "path": "./.cspell/project-words.txt",
+      "addWords": true
+    }
+  ],
+  "dictionaries": ["project-words", "en_US", "softwareTerms", "bash", "python", "node", "filetypes"],
+  "ignoreRegExpList": [
+    "/[0-9a-f]{7,40}/",
+    "/https?:\\/\\/[^\\s)]+/",
+    "/`[^`]+`/",
+    "/<!--[\\s\\S]*?-->/",
+    "/\\b[A-Z_]{3,}\\b/"
+  ],
+  "files": [
+    ".claude/team/charter.md",
+    "RUNBOOK.md",
+    "workers/README.md"
+  ],
+  "ignorePaths": [
+    ".venv/**",
+    "node_modules/**"
+  ]
+}
