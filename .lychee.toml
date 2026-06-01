@@ -1,0 +1,46 @@
+# lychee link-checker config for noorinalabs-isnad-ingest-platform docs (#326).
+#
+# Purpose: catch BROKEN INTERNAL cross-references between this repo's docs
+# (e.g. the charter / RUNBOOK / workers README link to each other and to files
+# in-tree; a renamed or missing target is a real defect). External-URL liveness
+# is intentionally NOT gated here — it depends on third-party uptime and would
+# make CI flaky and non-deterministic (a 503 on some unrelated site should never
+# block a docs PR). External links are excluded; internal/relative links are
+# checked.
+
+# Only check local filesystem + relative links; skip all remote schemes.
+scheme = ["file"]
+
+# Treat these as offline-only — never make network requests.
+offline = true
+
+# Exclude link targets that are not real broken-link signals.
+exclude = [
+  # External URLs / mailto — third-party liveness is not gated here.
+  '^https?://',
+  '^mailto:',
+  # GitHub issue/PR shorthand like `#326` is not a URL.
+  '^#\d+$',
+  # The team charter cross-references the ORG-level charter split docs via
+  # `../../../.claude/team/charter/<file>.md`. Those targets live in the parent
+  # noorinalabs-main checkout, not in this child repo, so they resolve only when
+  # the repos are nested under the parent. They are valid org-cross-refs, not
+  # broken links — exclude them rather than fail the gate.
+  '\.\./\.\./\.\./\.claude/team/charter/agents\.md$',
+  '\.\./\.\./\.\./\.claude/team/charter/branching\.md$',
+  '\.\./\.\./\.\./\.claude/team/charter/commits\.md$',
+  '\.\./\.\./\.\./\.claude/team/charter/communication\.md$',
+  '\.\./\.\./\.\./\.claude/team/charter/hooks\.md$',
+  '\.\./\.\./\.\./\.claude/team/charter/issues\.md$',
+  '\.\./\.\./\.\./\.claude/team/charter/pull-requests\.md$',
+  '\.\./\.\./\.\./\.claude/team/charter/tech-decisions\.md$',
+]
+
+# Skip generated/vendored trees.
+exclude_path = [
+  ".venv",
+  "node_modules",
+]
+
+# A relative link with no matching file is the failure we DO want to surface.
+require_https = false

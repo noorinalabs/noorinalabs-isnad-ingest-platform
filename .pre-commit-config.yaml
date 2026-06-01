@@ -1,0 +1,77 @@
+# Pre-commit hooks for noorinalabs-isnad-ingest-platform
+# Install:  uvx pre-commit install && uvx pre-commit install --hook-type pre-push
+# Docs:     https://pre-commit.com/
+#
+# This MIRRORS the CI workflows so a local commit/push fails fast instead of
+# surfacing a lint/format/type/test error only after a PR is opened (Phase-3
+# end-state criterion #6 / noorinalabs-main#327). The `setup-hooks` Make target
+# installs the framework standard the org uses, so the pre-commit <-> CI
+# sync-drift gate (.claude/lib/pre_commit_ci_sync.py) can verify the mirror.
+#
+# Stage split:
+#   pre-commit (fast, every commit) — ruff-format + ruff-lint over the python
+#     surface, plus actionlint over the workflows (mirrors docs.yml's actionlint
+#     job; fast, no Docker).
+#   pre-push   (heavier, every push) — mypy strict + the pytest suite. These run
+#     the whole src/ + tests surface, so they're push-time not commit-time to
+#     keep the commit loop snappy while still catching everything before the
+#     code leaves the machine.
+#
+# CI parity notes (ingest-platform specifics):
+#   * ci.yml's `lint-and-typecheck` job runs `ruff check`/`ruff format --check`
+#     over `src/ workers/ tests/` and `mypy src/`. ruff runs here via the
+#     ruff-pre-commit mirror PINNED to v0.15.11 (the org-canonical ruff pin —
+#     keep in lockstep with sibling repos + CI). mypy is pre-push (heavier).
+#   * ci.yml's `test` job runs `pytest -m "not integration"` with
+#     ENVIRONMENT=test. The testcontainers integration tests (Neo4j / Postgres /
+#     Kafka / MinIO) need Docker, so the pre-push pytest hook ALSO excludes them
+#     (`-m "not integration"`) — local push stays fast and Docker-free, matching
+#     what CI gates. Integration tests run via `make test-integration` when a
+#     Docker daemon is available.
+#   * The heavier hooks use `uv run` so the exact pinned tools from uv.lock run
+#     locally, never a stray global mypy/pytest.
+#   * actionlint is pinned (rhysd/actionlint v1.7.12) so the workflow-lint that
+#     docs.yml enforces in CI also runs locally — keeping the UNSCOPED sync-drift
+#     gate (which scans every workflow, docs.yml included) green.
+#
+# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest, actionlint present
+# on both sides) is enforced in CI by `.claude/lib/pre_commit_ci_sync.py` — if a
+# future edit drops one side, that gate fails the build.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.11
+    hooks:
+      - id: ruff-format
+        name: ruff-format
+        files: ^(src|workers|tests)/
+      - id: ruff
+        args: [--fix]
+        name: ruff-lint
+        files: ^(src|workers|tests)/
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        name: actionlint (workflows)
+
+  # Heavier checks run at pre-push (mirror CI's mypy + the test job). Run as
+  # `local`/`system` hooks via `uv run` so the pinned tools from uv.lock are
+  # used and never drift from CI.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy-strict (pre-push)
+        entry: uv run mypy src/
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      - id: pytest
+        name: pytest (pre-push, unit only)
+        entry: env ENVIRONMENT=test uv run pytest -m "not integration" -q
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
