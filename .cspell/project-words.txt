@@ -14,6 +14,9 @@ narrator
 narrators
 annunaki
 sunnah
+matn
+bukhari
+muslim
 
 # --- Roster / team names (commit identity + reviewer pairing) ---
 Adaeze

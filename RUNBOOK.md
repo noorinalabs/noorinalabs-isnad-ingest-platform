@@ -239,7 +239,10 @@ driver at it to complete the live-data leg — the rest of the chain is
 unchanged:
 
 ```bash
-# bring up Neo4j (e.g. from noorinalabs-deploy, or any reachable bolt:// URI)
+# bring up Neo4j (e.g. from noorinalabs-deploy, or a throwaway container)
+docker run -d --rm --name e2e-neo4j -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/changeme neo4j:5-community
+
 uv run python scripts/e2e_pipeline_run.py \
   --neo4j-uri bolt://localhost:7687 \
   --neo4j-user neo4j --neo4j-password changeme
@@ -247,6 +250,27 @@ uv run python scripts/e2e_pipeline_run.py \
 
 This uses the real `neo4j` driver and the rows MERGE into the live graph;
 the script then runs the same validate count queries against it.
+
+**Verified live (2026-06-10):** ran against a real `neo4j:5-community`
+container — identical end state to the in-process capture (15 nodes /
+11 relationships; zero DLQ). Independent `cypher-shell` confirmed the
+hadith content landed and is queryable, e.g.:
+
+```
+MATCH (h:Hadith {id:'hdt:sunnah:sunnah:bukhari:1:1'})-[:APPEARS_IN]->(c:Collection)
+RETURN h.matn_en, h.sect, c.id;
+# → "Actions are judged by intentions…", "sunni", "col:bukhari"
+```
+
+> **Known divergence (tracked):** the streaming `_hadith_id` prepends
+> `source_corpus` to a `source_id` that the parsers already corpus-prefix
+> (`generate_source_id`), so the Hadith id lands as
+> `hdt:sunnah:sunnah:bukhari:1:1` (corpus doubled) — whereas the batch
+> loader `src/graph/load_nodes.py` keys the same hadith as
+> `hdt:sunnah:bukhari:1:1`. The two ingest paths would MERGE the same
+> hadith as two nodes. Caught by this E2E's realistic corpus-prefixed
+> fixture (the Kafka E2E's `h-1` fixture masks it). Flagged for a
+> follow-up defect; normalize is the side to fix.
 
 ---
 
