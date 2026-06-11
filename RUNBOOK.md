@@ -18,14 +18,15 @@ relevant.
 
 1. [Topology](#topology)
 2. [Local-dev setup (MinIO + KRaft Kafka)](#local-dev-setup-minio--kraft-kafka)
-3. [Worker build and run](#worker-build-and-run)
-4. [Deploy procedure](#deploy-procedure)
-5. [Rollback](#rollback)
-6. [Common-failure triage](#common-failure-triage)
-7. [Maintenance](#maintenance)
-8. [On-call escalation](#on-call-escalation)
-9. [References](#references)
-10. [Known gaps and carry-forwards](#known-gaps-and-carry-forwards)
+3. [First-light E2E run (no Docker)](#first-light-e2e-run-no-docker--scriptse2e_pipeline_runpy)
+4. [Worker build and run](#worker-build-and-run)
+5. [Deploy procedure](#deploy-procedure)
+6. [Rollback](#rollback)
+7. [Common-failure triage](#common-failure-triage)
+8. [Maintenance](#maintenance)
+9. [On-call escalation](#on-call-escalation)
+10. [References](#references)
+11. [Known gaps and carry-forwards](#known-gaps-and-carry-forwards)
 
 ---
 
@@ -174,6 +175,78 @@ EOF
 (You will need a corresponding empty Parquet at that key in MinIO; or
 expect the batch to land in `pipeline.dlq` with a `NoSuchKey` — that
 itself proves the consume → fetch → DLQ path works.)
+
+---
+
+## First-light E2E run (no Docker) — `scripts/e2e_pipeline_run.py`
+
+`scripts/e2e_pipeline_run.py` drives the **whole pipeline in one process**
+— `acquire(sunnah) → raw → dedup → enrich → normalize → ingest → graph`
+— with **no Docker, no Kafka broker, no MinIO, no Neo4j container**. It is
+the answer to noorinalabs-main#139 ("prove the plumbing before scaling to
+8 sources and before pointing workers at prod Neo4j") for environments
+where Docker isn't available. The companion
+`tests/integration/test_kafka_worker_e2e.py` proves the same chain through
+*real* Kafka + MinIO + Neo4j containers (Docker-gated); this driver is the
+container-free counterpart.
+
+What runs is **production code** at every hop: the four real processors
+(`DedupProcessor`/`EnrichProcessor`/`NormalizeProcessor`/`IngestProcessor`)
+inside the real `WorkerRunner` loop, the real `ObjectStore` (over an
+in-memory S3), real `PipelineMessage` pointers routed through the real
+topic topology, normalize's D-ii manifest fan-out, and the ingest stage's
+real Cypher MERGE. Only three things are substituted for the missing infra:
+an in-memory Kafka broker, an in-memory S3 backend, and (by default) an
+in-process `CapturingNeo4jDriver` that executes the ingest Cypher against a
+faithful in-memory graph.
+
+```bash
+uv run python scripts/e2e_pipeline_run.py            # human-readable evidence
+uv run python scripts/e2e_pipeline_run.py --json      # machine-readable summary
+```
+
+Expected end state (zero DLQ; exit 0):
+
+```
+Per-hop traversal:
+  dedup      pipeline.raw.landed      → pipeline.dedup.done       (msgs 1→1, dlq 0, +2 objects)
+  enrich     pipeline.dedup.done      → pipeline.enrich.done      (msgs 1→1, dlq 0, +2 objects)
+  normalize  pipeline.enrich.done     → pipeline.normalize.done   (msgs 1→1, dlq 0, +7 objects)
+  ingest     pipeline.normalize.done  → (terminal → Neo4j)        (msgs 1→0, dlq 0)
+
+DLQ entries: 0
+Graph end state:  Hadith 3 · Collection 2 · Narrator 5 · Chain 3 · Grading 2
+                  APPEARS_IN 3 · TRANSMITTED_TO 4 · NARRATED 2 · GRADED_BY 2
+```
+
+The 3-row sunnah fixture deliberately mixes a bare-matn row (sunnah_api
+shape: no isnad → Hadith + Collection + Chain) with two isnad-bearing rows
+(sunnah_scraped shape) so the Narrator / Chain / `TRANSMITTED_TO` /
+`NARRATED` / Grading / `GRADED_BY` fan-out is all exercised.
+
+**dedup/enrich ML degradation:** without the `ml` dependency group
+(`sentence-transformers`/`faiss`, `transformers`/`torch`) both stages
+degrade gracefully — they pass the hadith payload through and emit empty
+side tables — so the *plumbing* is proven regardless. Install `--group ml`
+to exercise real dedup/enrich. The run logs `*_ml_deps_unavailable` /
+`*_transformers_unavailable` so degraded stages are visible in the output.
+
+### Completing the live-Neo4j leg
+
+The default run lands data in the in-process capture, not a live database.
+The moment Docker **or** a reachable Neo4j is available, point the same
+driver at it to complete the live-data leg — the rest of the chain is
+unchanged:
+
+```bash
+# bring up Neo4j (e.g. from noorinalabs-deploy, or any reachable bolt:// URI)
+uv run python scripts/e2e_pipeline_run.py \
+  --neo4j-uri bolt://localhost:7687 \
+  --neo4j-user neo4j --neo4j-password changeme
+```
+
+This uses the real `neo4j` driver and the rows MERGE into the live graph;
+the script then runs the same validate count queries against it.
 
 ---
 
