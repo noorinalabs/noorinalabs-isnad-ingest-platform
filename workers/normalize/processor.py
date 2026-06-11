@@ -28,8 +28,9 @@ Stable-ID generation
 IDs are deterministic so re-processing the same batch produces the same
 node identities (idempotent ingest MERGE). Hash inputs:
 
-* ``Hadith``   — ``hdt:<source_corpus>:<source_id>`` (already canonical
-  from the source parser; no hashing required).
+* ``Hadith``   — ``hdt:<source_id>`` where ``source_id`` is already
+  corpus-prefixed by the parser (``sunnah:bukhari:1:1``); no hashing and
+  no extra corpus prepend (#63). Matches ``src/graph/load_nodes.py``.
 * ``Narrator`` — ``nar:<sha1-24>`` of
   ``<lower(name_en)>|<normalize_arabic(name_ar)>``. Blank sides are
   represented as the empty string so pure-English and pure-Arabic
@@ -179,9 +180,20 @@ def _normalize_arabic_safe(text: str) -> str:
         return text.strip()
 
 
-def _hadith_id(source_corpus: str, source_id: str) -> str:
-    key = f"{source_corpus}:{source_id}"
-    return key if key.startswith("hdt:") else f"hdt:{key}"
+def _hadith_id(source_id: str) -> str:
+    """Canonical Hadith id — ``hdt:<source_id>`` (matches the batch loaders).
+
+    ``source_id`` is already corpus-prefixed by the parsers
+    (``generate_source_id`` emits ``<corpus>:<collection>:<parts>``, e.g.
+    ``sunnah:bukhari:1:1``), so the corpus must NOT be prepended a second
+    time — that produced the doubled ``hdt:sunnah:sunnah:bukhari:1:1`` of
+    #63, which split one hadith into two Neo4j nodes against the batch
+    loader's ``hdt:sunnah:bukhari:1:1``. This now mirrors
+    ``src/graph/load_nodes.py`` (``f"hdt:{sid}"``) and
+    ``src/graph/load_edges.py`` exactly so streaming and batch MERGE the
+    same node.
+    """
+    return source_id if source_id.startswith("hdt:") else f"hdt:{source_id}"
 
 
 def _collection_id(collection_name: str) -> str:
@@ -208,7 +220,7 @@ def _fan_out_row(row: dict[str, Any]) -> tuple[list[_NodeRow], list[_EdgeRow]]:
     collection_name = row["collection_name"]
     sect = row["sect"]
 
-    hid = _hadith_id(source_corpus, source_id)
+    hid = _hadith_id(source_id)
     cid = _collection_id(collection_name)
 
     nodes: list[_NodeRow] = [

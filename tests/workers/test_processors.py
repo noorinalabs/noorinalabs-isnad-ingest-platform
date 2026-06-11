@@ -348,6 +348,44 @@ class TestNormalizeProcessor:
         assert "NARRATED" in edge_labels
         assert "TRANSMITTED_TO" in edge_labels
 
+    def test_hadith_id_matches_batch_loader_no_doubled_corpus(
+        self,
+        object_store: ObjectStore,
+        sample_message: PipelineMessage,
+        hadith_row: Any,
+    ) -> None:
+        """Streaming normalize must emit the SAME Hadith id as the batch loader (#63).
+
+        ``source_id`` is already corpus-prefixed by the parsers
+        (``generate_source_id`` -> ``sunnah:bukhari:1:1``). The batch loader
+        keys the Hadith node as ``hdt:{source_id}`` (``src/graph/load_nodes.py``
+        line ``hid = f"hdt:{sid}"``). normalize previously prepended
+        ``source_corpus`` a second time, producing the doubled
+        ``hdt:sunnah:sunnah:bukhari:1:1`` and a duplicate node for the same
+        hadith. Assert the streaming id equals the batch id exactly so the two
+        paths MERGE one node, not two.
+        """
+        source_id = "sunnah:bukhari:1:1"
+        rows = [hadith_row(source_id=source_id, source_corpus="sunnah", matn_en="text")]
+        _seed(object_store, sample_message.b2_path, build_hadith_parquet(rows))
+
+        nxt = NormalizeProcessor(object_store)(sample_message)
+
+        hadiths = self._read_nodes(object_store, nxt.b2_path, "hadiths.parquet")
+        assert len(hadiths) == 1
+        streaming_id = hadiths[0]["id"]
+
+        # The exact id the batch loader would MERGE on (load_nodes.py).
+        batch_id = f"hdt:{source_id}"
+        assert streaming_id == batch_id, (
+            f"streaming Hadith id {streaming_id!r} != batch id {batch_id!r} — "
+            "the corpus prefix is doubled (#63)"
+        )
+        # Defensively pin the exact value so a regression can't pass by
+        # coincidentally agreeing on a wrong-but-equal id.
+        assert streaming_id == "hdt:sunnah:bukhari:1:1"
+        assert "sunnah:sunnah" not in streaming_id
+
     def test_every_node_row_matches_allowed_label_vocabulary(
         self,
         object_store: ObjectStore,
