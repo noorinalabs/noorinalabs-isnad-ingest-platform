@@ -13,6 +13,7 @@ hadiths
 narrator
 narrators
 annunaki
+sunnah
 
 # --- Roster / team names (commit identity + reviewer pairing) ---
 Adaeze
@@ -60,6 +61,7 @@ Hetzner
 ghcr
 buildx
 testcontainers
+faiss
 pytest
 asyncio
 ruff
