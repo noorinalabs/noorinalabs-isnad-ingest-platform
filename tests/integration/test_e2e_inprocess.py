@@ -73,6 +73,18 @@ def test_graph_end_state_matches_fixture() -> None:
     g = summary["graph"]
 
     # One Hadith node per input row; APPEARS_IN edge per row.
+    #
+    # NOTE: these are COUNT assertions only. This harness does NOT assert the
+    # Hadith node *id* string, and deliberately so: with a realistic
+    # corpus-prefixed fixture the streaming normalize worker currently emits a
+    # DOUBLE-prefixed id (``hdt:sunnah:sunnah:bukhari:1:1``) — that is the
+    # ig#63 bug, NOT the canonical contract. The canonical id is the batch
+    # loader's single-prefix ``hdt:<source_id>`` (``hdt:sunnah:bukhari:1:1``),
+    # confirmed against src/models/hadith.py + src/graph/load_nodes.py and the
+    # live-loaded da#73 graph. Once ig#63 lands (normalize → single-prefix),
+    # this test gains an explicit cross-path id-equality assertion
+    # (batch == streaming). Until then it stays count-only so it neither
+    # endorses the buggy id nor breaks on the in-flight fix.
     assert g["Hadith"] == len(rows)
     assert g["APPEARS_IN"] == len(rows)
 
