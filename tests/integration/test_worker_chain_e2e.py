@@ -368,7 +368,7 @@ def test_streaming_hadith_id_matches_batch_loader_through_real_neo4j(
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "BUG (ig#TBD, reported to team lead): src/pipeline/reset._delete_prefix "
+        "BUG (#68): src/pipeline/reset._delete_prefix "
         "calls client.delete_objects() which a real S3-compatible store (MinIO, "
         "and B2) rejects with 'MissingContentMD5' under botocore>=1.36 — the bulk "
         "DeleteObjects op needs a Content-MD5/checksum header boto3 no longer adds "
