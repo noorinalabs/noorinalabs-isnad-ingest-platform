@@ -26,11 +26,26 @@ class PostgresSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PG_")
 
 
+class AuthSettings(BaseSettings):
+    """Auth settings for the admin HTTP surface.
+
+    Mirrors isnad-graph's ``AuthSettings`` so the same user-service RS256
+    JWT validates identically in both services — an admin token minted for
+    the isnad-graph admin dashboard is accepted by the reset endpoints here.
+    """
+
+    user_service_url: str = "http://localhost:8001"
+    user_service_jwks_cache_ttl: int = 3600
+
+    model_config = SettingsConfigDict(env_prefix="AUTH_")
+
+
 class Settings(BaseSettings):
     """Root application settings, composed from nested service settings."""
 
     neo4j: Neo4jSettings = Neo4jSettings()
     postgres: PostgresSettings = PostgresSettings()
+    auth: AuthSettings = AuthSettings()
 
     sunnah_api_key: str = ""
     kaggle_username: str = ""
