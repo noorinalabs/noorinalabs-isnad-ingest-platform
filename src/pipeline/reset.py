@@ -217,8 +217,15 @@ class ResetReport:
         }
 
 
-# Allowed values for ``confirmation_method`` — keep in sync with CLI flag mapping.
-CONFIRMATION_METHODS: frozenset[str] = frozenset({"interactive", "yes-flag", "not-required"})
+# Allowed values for ``confirmation_method`` — keep in sync with CLI flag mapping
+# and the HTTP reset endpoints (``src/api/reset_router.py``). Each value is a
+# distinct authorization channel so SIEM can attribute a reset to how it was
+# triggered:
+#   interactive  — operator typed OBLITERATE at the CLI/TTY prompt
+#   yes-flag     — CLI ``--yes`` runbook automation
+#   not-required — non-obliterate scope (stage/source)
+#   api          — OBLITERATE token supplied via the admin HTTP endpoint
+CONFIRMATION_METHODS: frozenset[str] = frozenset({"interactive", "yes-flag", "not-required", "api"})
 
 
 class PipelineResetter:
@@ -252,8 +259,9 @@ class PipelineResetter:
         """Execute a reset and persist an audit entry.
 
         ``confirmation_method`` records how the operator authorized the run
-        (``"interactive"``, ``"yes-flag"``, or ``"not-required"``) so SIEM
-        can distinguish runbook automation from a typed OBLITERATE confirm.
+        (``"interactive"``, ``"yes-flag"``, ``"not-required"``, or ``"api"``)
+        so SIEM can distinguish runbook automation, a typed OBLITERATE confirm,
+        and an HTTP-driven admin reset from one another.
 
         Returns the report, the audit entry, and the path where the
         audit entry was written.
