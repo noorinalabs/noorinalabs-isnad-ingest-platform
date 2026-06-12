@@ -23,6 +23,9 @@ dependencies = [
     "rapidfuzz>=3.6",
     "kafka-python>=2.0",
     "boto3>=1.34",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "python-jose[cryptography]>=3.3",
 ]
 
 [project.scripts]
@@ -106,6 +109,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["kaggle", "kaggle.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["jose", "jose.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
