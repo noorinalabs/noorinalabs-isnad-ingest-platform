@@ -19,13 +19,14 @@ admin-only.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.api.deps import get_data_dir, get_resetter
+from src.api.deps import get_data_dir, get_resetter_factory
 from src.pipeline.reset import PipelineResetter, ResetScope, write_dry_run_audit
 
 router = APIRouter(prefix="/reset", tags=["admin", "reset"])
@@ -81,19 +82,24 @@ def _run_reset(
     *,
     confirmation_method: str,
     dry_run: bool,
-    resetter: PipelineResetter,
+    resetter_factory: Callable[[], PipelineResetter],
     data_dir: Path,
 ) -> ResetResponse:
     """Execute (or dry-run) a reset and shape the HTTP response.
 
     Both paths emit an audit entry — real resets via ``PipelineResetter.reset``,
     dry-runs via ``write_dry_run_audit`` — matching the CLI exactly.
+
+    The resetter is built (via ``resetter_factory``) ONLY in the non-dry-run
+    branch, so a dry-run never constructs the live boto3/Kafka/Neo4j/PG
+    clients — keeping the preview path inert, which ig#970's admin UI relies on.
     """
     if dry_run:
         report, _entry, audit_path = write_dry_run_audit(
             scope, confirmation_method=confirmation_method, data_dir=data_dir
         )
     else:
+        resetter = resetter_factory()
         report, _entry, audit_path = resetter.reset(scope, confirmation_method=confirmation_method)
 
     return ResetResponse(
@@ -108,7 +114,7 @@ def _run_reset(
 @router.post("/stage", response_model=ResetResponse)
 def reset_stage(
     body: StageResetRequest,
-    resetter: Annotated[PipelineResetter, Depends(get_resetter)],
+    resetter_factory: Annotated[Callable[[], PipelineResetter], Depends(get_resetter_factory)],
     data_dir: Annotated[Path, Depends(get_data_dir)],
 ) -> ResetResponse:
     """Wipe one stage's B2 prefix and reset that stage's Kafka consumer offsets."""
@@ -122,7 +128,7 @@ def reset_stage(
         scope,
         confirmation_method="not-required",
         dry_run=body.dry_run,
-        resetter=resetter,
+        resetter_factory=resetter_factory,
         data_dir=data_dir,
     )
 
@@ -130,7 +136,7 @@ def reset_stage(
 @router.post("/source", response_model=ResetResponse)
 def reset_source(
     body: SourceResetRequest,
-    resetter: Annotated[PipelineResetter, Depends(get_resetter)],
+    resetter_factory: Annotated[Callable[[], PipelineResetter], Depends(get_resetter_factory)],
     data_dir: Annotated[Path, Depends(get_data_dir)],
 ) -> ResetResponse:
     """Wipe every stage prefix for one data source."""
@@ -143,7 +149,7 @@ def reset_source(
         scope,
         confirmation_method="not-required",
         dry_run=body.dry_run,
-        resetter=resetter,
+        resetter_factory=resetter_factory,
         data_dir=data_dir,
     )
 
@@ -151,7 +157,7 @@ def reset_source(
 @router.post("/full", response_model=ResetResponse)
 def reset_full(
     body: FullResetRequest,
-    resetter: Annotated[PipelineResetter, Depends(get_resetter)],
+    resetter_factory: Annotated[Callable[[], PipelineResetter], Depends(get_resetter_factory)],
     data_dir: Annotated[Path, Depends(get_data_dir)],
 ) -> ResetResponse:
     """Full obliterate. Rejects the call unless the OBLITERATE token is supplied.
@@ -170,6 +176,6 @@ def reset_full(
         ResetScope.full_scope(),
         confirmation_method="interactive",
         dry_run=body.dry_run,
-        resetter=resetter,
+        resetter_factory=resetter_factory,
         data_dir=data_dir,
     )
