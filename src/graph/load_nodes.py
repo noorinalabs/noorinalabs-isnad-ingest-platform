@@ -15,6 +15,7 @@ from typing import Any
 import pyarrow.parquet as pq
 import yaml
 
+from src.parse.identity import hadith_node_id
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
 
@@ -189,7 +190,7 @@ def _load_hadiths(
                 all_errors.append(f"{fp.name} row {i}: invalid source_id={sid!r}")
                 total_skipped += 1
                 continue
-            hid = f"hdt:{sid}" if not sid.startswith("hdt:") else sid
+            hid = hadith_node_id(sid)
             batch.append(
                 {
                     "id": hid,
@@ -364,7 +365,7 @@ def _load_chains(
         batch.append(
             {
                 "id": chn_id,
-                "hadith_id": f"hdt:{hid}" if not hid.startswith("hdt:") else hid,
+                "hadith_id": hadith_node_id(hid),
                 "chain_index": 0,
                 "full_chain_text_ar": None,
                 "full_chain_text_en": None,
@@ -437,7 +438,7 @@ def _load_gradings(
             batch.append(
                 {
                     "id": gid,
-                    "hadith_id": f"hdt:{sid}" if not sid.startswith("hdt:") else sid,
+                    "hadith_id": hadith_node_id(sid),
                     "scholar_name": _val(row, "collection_name", "unknown"),
                     "grade": grade,
                     "methodology_school": None,
