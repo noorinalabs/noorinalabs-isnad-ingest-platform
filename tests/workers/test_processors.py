@@ -386,6 +386,45 @@ class TestNormalizeProcessor:
         assert streaming_id == "hdt:sunnah:bukhari:1:1"
         assert "sunnah:sunnah" not in streaming_id
 
+    def test_already_doubled_source_id_collapses_to_one_node(
+        self,
+        object_store: ObjectStore,
+        sample_message: PipelineMessage,
+        hadith_row: Any,
+    ) -> None:
+        """A ``source_id`` that ALREADY carries a doubled corpus must collapse (#72).
+
+        The previous ad-hoc guard (``source_id if startswith("hdt:") else
+        f"hdt:{source_id}"``) only deduped the ``hdt:`` prefix — it did NOT
+        collapse a doubled leading *corpus*, so a staging
+        ``sunnah:sunnah:bukhari:1`` (the main#139 hazard, e.g. an upstream
+        producer that prepended the corpus a second time) became
+        ``hdt:sunnah:sunnah:bukhari:1`` — a duplicate node against the batch
+        loader's collapsed ``hdt:sunnah:bukhari:1``. Routing through the shared
+        ``src.parse.identity.hadith_node_id`` collapses it. A realistic
+        corpus-prefixed id is used deliberately: a toy ``h-1`` fixture has no
+        corpus segment and would mask this exact bug class.
+        """
+        from src.parse.identity import hadith_node_id  # noqa: PLC0415 — local to the test
+
+        doubled = "sunnah:sunnah:bukhari:1"
+        rows = [hadith_row(source_id=doubled, source_corpus="sunnah", matn_en="text")]
+        _seed(object_store, sample_message.b2_path, build_hadith_parquet(rows))
+
+        nxt = NormalizeProcessor(object_store)(sample_message)
+
+        hadiths = self._read_nodes(object_store, nxt.b2_path, "hadiths.parquet")
+        assert len(hadiths) == 1
+        streaming_id = hadiths[0]["id"]
+
+        # Collapsed to exactly one corpus segment — the value the batch loader
+        # now also emits (both paths consume the same helper).
+        assert streaming_id == "hdt:sunnah:bukhari:1"
+        assert streaming_id == hadith_node_id(doubled)
+        assert "sunnah:sunnah" not in streaming_id
+        # The pre-fix code would have produced this doubled id; assert it's gone.
+        assert streaming_id != "hdt:sunnah:sunnah:bukhari:1"
+
     def test_every_node_row_matches_allowed_label_vocabulary(
         self,
         object_store: ObjectStore,

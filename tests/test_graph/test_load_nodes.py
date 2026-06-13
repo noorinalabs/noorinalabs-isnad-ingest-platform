@@ -114,6 +114,34 @@ class TestLoadHadiths:
         assert len(hadith_batches) >= 1
         assert hadith_batches[0][0]["id"] == "hdt:bukhari-1"
 
+    def test_doubled_corpus_source_id_collapses(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """Batch loader collapses an already-doubled corpus prefix (#72).
+
+        The loader now keys the Hadith node via the shared
+        ``src.parse.identity.hadith_node_id`` rather than the old
+        ``f"hdt:{sid}"`` guard, so a staging ``sunnah:sunnah:bukhari:1`` (the
+        main#139 hazard) collapses to ``hdt:sunnah:bukhari:1`` — the SAME id the
+        streaming/normalize path emits, so both MERGE one node. A realistic
+        corpus-prefixed id is used on purpose: the toy ``bukhari-1`` / ``h-1``
+        fixtures elsewhere have no corpus segment and cannot exercise this bug.
+        """
+        write_hadiths(staging_dir, [{"source_id": "sunnah:sunnah:bukhari:1"}])
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        hadith_batches = [
+            batch
+            for query, batch in mock_client.calls
+            if isinstance(batch, list)
+            and batch
+            and "id" in batch[0]
+            and batch[0]["id"].startswith("hdt:")
+        ]
+        assert len(hadith_batches) >= 1
+        loaded_id = hadith_batches[0][0]["id"]
+        assert loaded_id == "hdt:sunnah:bukhari:1"
+        assert "sunnah:sunnah" not in loaded_id
+
     def test_invalid_source_id_skipped(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:
