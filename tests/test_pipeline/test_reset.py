@@ -414,6 +414,18 @@ class TestAuditSummaryFieldsExplicit:
         summary = json.loads(audit_path.read_text())["summary"]
         assert summary["confirmation_method"] == "interactive"
 
+    def test_confirmation_method_api_recorded(
+        self, resetter: PipelineResetter, tmp_path: Path
+    ) -> None:
+        """Issue #74: an HTTP-driven full reset records ``"api"`` so SIEM can
+        distinguish it from a typed CLI confirmation."""
+        _report, _entry, audit_path = resetter.reset(
+            ResetScope.full_scope(), confirmation_method="api"
+        )
+
+        summary = json.loads(audit_path.read_text())["summary"]
+        assert summary["confirmation_method"] == "api"
+
     def test_confirmation_method_rejects_unknown_value(self, resetter: PipelineResetter) -> None:
         with pytest.raises(ValueError, match="invalid confirmation_method"):
             resetter.reset(ResetScope.stage_scope("raw"), confirmation_method="approved")
@@ -421,7 +433,7 @@ class TestAuditSummaryFieldsExplicit:
     def test_confirmation_methods_enum_locked(self) -> None:
         """Guard test — adding/removing a confirmation method is a contract
         change for downstream SIEM dashboards. Bump intentionally."""
-        assert CONFIRMATION_METHODS == frozenset({"interactive", "yes-flag", "not-required"})
+        assert CONFIRMATION_METHODS == frozenset({"interactive", "yes-flag", "not-required", "api"})
 
     def test_report_carries_new_fields_for_caller_inspection(
         self, resetter: PipelineResetter

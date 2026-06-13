@@ -225,11 +225,13 @@ def test_full_reset_with_obliterate_executes(
     assert len(fake_resetter.calls) == 1
     scope, confirmation_method = fake_resetter.calls[0]
     assert scope.level == "full"
-    # API-supplied OBLITERATE token maps to the CLI's typed-confirm method.
-    assert confirmation_method == "interactive"
+    # Issue #74: the OBLITERATE token over HTTP records the distinct "api"
+    # method (not "interactive") so SIEM can attribute it to the admin endpoint.
+    # The endpoint fixes this value itself — it is not read from the request body.
+    assert confirmation_method == "api"
     body: dict[str, Any] = resp.json()
     assert body["level"] == "full"
-    assert body["confirmation_method"] == "interactive"
+    assert body["confirmation_method"] == "api"
 
 
 # ---------------------------------------------------------------------------
