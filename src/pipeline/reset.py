@@ -391,7 +391,15 @@ def _delete_prefix(store: _ObjectStoreProto, prefix: S3Prefix) -> int:
     """Delete every object under ``prefix`` in ``store.bucket``.
 
     Returns the number of objects deleted. Uses the paginated ``list_objects_v2``
-    surface so very large prefixes don't blow past a single-response limit.
+    surface so very large prefixes don't blow past a single-response limit, and
+    removes each key with the per-object ``delete_object`` (S3 ``DeleteObject``)
+    rather than the bulk ``delete_objects`` (``DeleteObjects``). The bulk op
+    requires a ``Content-MD5``/checksum header that boto3 (botocore>=1.36) no
+    longer adds by default, so real S3-compatible stores (MinIO, Backblaze B2)
+    reject it with ``MissingContentMD5`` — AWS S3 happens to be lenient, which
+    is why it slipped through. ``DeleteObject`` carries no such requirement and
+    matches the per-object delete ``ObjectStore.rename_object`` already uses
+    (#69).
     """
     client = store.client
     deleted = 0
@@ -403,10 +411,9 @@ def _delete_prefix(store: _ObjectStoreProto, prefix: S3Prefix) -> int:
             kwargs["ContinuationToken"] = continuation
         response = client.list_objects_v2(**kwargs)
         contents = response.get("Contents", []) or []
-        if contents:
-            to_delete = [{"Key": obj["Key"]} for obj in contents]
-            client.delete_objects(Bucket=store.bucket, Delete={"Objects": to_delete, "Quiet": True})
-            deleted += len(to_delete)
+        for obj in contents:
+            client.delete_object(Bucket=store.bucket, Key=obj["Key"])
+            deleted += 1
         if not response.get("IsTruncated"):
             break
         continuation = response.get("NextContinuationToken")

@@ -365,19 +365,6 @@ def test_streaming_hadith_id_matches_batch_loader_through_real_neo4j(
     assert all("sunnah:sunnah" not in i for i in ids), "corpus prefix doubled (#63)"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (#69): src/pipeline/reset._delete_prefix "
-        "calls client.delete_objects() which a real S3-compatible store (MinIO, "
-        "and B2) rejects with 'MissingContentMD5' under botocore>=1.36 — the bulk "
-        "DeleteObjects op needs a Content-MD5/checksum header boto3 no longer adds "
-        "by default. The unit suite never caught it because FakeS3Client.delete_"
-        "objects is an in-memory no-op. This integration scenario is the regression "
-        "guard; remove the xfail once reset uses per-object delete_object (which "
-        "ObjectStore already does) or sets the checksum header."
-    ),
-)
 def test_admin_stage_reset_wipes_only_normalized_prefix_on_real_minio(
     bootstrap: str,
     minio_store: ObjectStore,
@@ -390,8 +377,12 @@ def test_admin_stage_reset_wipes_only_normalized_prefix_on_real_minio(
     objects — the upstream raw/ and dedup/ payloads survive, so the stage can be
     re-run without re-acquiring or re-deduping. The unit suite proves the reset
     *logic* against ``FakeS3Client``; this proves it against the real
-    ``list_objects_v2`` / ``delete_objects`` S3 surface the resetter calls — and
-    currently surfaces a real defect in that surface (see the ``xfail`` reason).
+    ``list_objects_v2`` / ``delete_object`` S3 surface the resetter calls.
+
+    Was ``xfail(strict)`` while ``_delete_prefix`` used the bulk
+    ``delete_objects`` (``DeleteObjects``), which MinIO/B2 reject with
+    ``MissingContentMD5`` under botocore>=1.36; un-xfail'd once the resetter
+    switched to per-object ``delete_object`` (#69).
     """
     from src.pipeline.reset import (
         STAGE_PREFIXES,

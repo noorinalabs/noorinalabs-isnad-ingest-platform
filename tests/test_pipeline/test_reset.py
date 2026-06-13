@@ -25,7 +25,12 @@ from src.pipeline.reset import (
 
 
 class _FakeS3Client:
-    """In-memory S3 client supporting ``list_objects_v2`` + ``delete_objects``."""
+    """In-memory S3 client supporting ``list_objects_v2`` + ``delete_object``.
+
+    Models the per-object ``delete_object`` (``DeleteObject``) surface the
+    resetter uses — NOT the bulk ``delete_objects``, which real S3-compatible
+    stores reject with ``MissingContentMD5`` under botocore>=1.36 (#69).
+    """
 
     def __init__(self, objects: dict[tuple[str, str], bytes] | None = None) -> None:
         self.objects: dict[tuple[str, str], bytes] = dict(objects or {})
@@ -39,10 +44,9 @@ class _FakeS3Client:
             "IsTruncated": False,
         }
 
-    def delete_objects(self, *, Bucket: str, Delete: dict[str, Any]) -> dict[str, Any]:
-        for obj in Delete["Objects"]:
-            self.objects.pop((Bucket, obj["Key"]), None)
-        return {"Deleted": Delete["Objects"]}
+    def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        self.objects.pop((Bucket, Key), None)
+        return {}
 
 
 class _FakeStore:
