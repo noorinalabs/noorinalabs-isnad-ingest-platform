@@ -28,9 +28,14 @@ Stable-ID generation
 IDs are deterministic so re-processing the same batch produces the same
 node identities (idempotent ingest MERGE). Hash inputs:
 
-* ``Hadith``   — ``hdt:<source_id>`` where ``source_id`` is already
-  corpus-prefixed by the parser (``sunnah:bukhari:1:1``); no hashing and
-  no extra corpus prepend (#63). Matches ``src/graph/load_nodes.py``.
+* ``Hadith``   — :func:`src.parse.identity.hadith_node_id`, the shared
+  ``hdt:<source_id>`` rule consumed by both this streaming path and the
+  batch loaders (``src/graph/load_{nodes,edges}.py``). ``source_id`` is
+  already corpus-prefixed by the parser (``sunnah:bukhari:1:1``), so the
+  helper is idempotent on the ``hdt:`` prefix AND collapses an
+  accidentally doubled leading corpus (``hdt:sunnah:sunnah:...``) — the
+  main#139 / #63 / #72 double-prefix hazard that previously split one
+  hadith into two Neo4j nodes against the batch loader.
 * ``Narrator`` — ``nar:<sha1-24>`` of
   ``<lower(name_en)>|<normalize_arabic(name_ar)>``. Blank sides are
   represented as the empty string so pure-English and pure-Arabic
@@ -67,6 +72,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from src.parse.identity import hadith_node_id
 from src.parse.narrator_extraction import extract_narrator_mentions
 from src.parse.schemas import HADITH_SCHEMA
 from workers.lib.log import get_logger
@@ -180,22 +186,6 @@ def _normalize_arabic_safe(text: str) -> str:
         return text.strip()
 
 
-def _hadith_id(source_id: str) -> str:
-    """Canonical Hadith id — ``hdt:<source_id>`` (matches the batch loaders).
-
-    ``source_id`` is already corpus-prefixed by the parsers
-    (``generate_source_id`` emits ``<corpus>:<collection>:<parts>``, e.g.
-    ``sunnah:bukhari:1:1``), so the corpus must NOT be prepended a second
-    time — that produced the doubled ``hdt:sunnah:sunnah:bukhari:1:1`` of
-    #63, which split one hadith into two Neo4j nodes against the batch
-    loader's ``hdt:sunnah:bukhari:1:1``. This now mirrors
-    ``src/graph/load_nodes.py`` (``f"hdt:{sid}"``) and
-    ``src/graph/load_edges.py`` exactly so streaming and batch MERGE the
-    same node.
-    """
-    return source_id if source_id.startswith("hdt:") else f"hdt:{source_id}"
-
-
 def _collection_id(collection_name: str) -> str:
     return f"col:{_normalize_collection_name(collection_name)}"
 
@@ -220,7 +210,7 @@ def _fan_out_row(row: dict[str, Any]) -> tuple[list[_NodeRow], list[_EdgeRow]]:
     collection_name = row["collection_name"]
     sect = row["sect"]
 
-    hid = _hadith_id(source_id)
+    hid = hadith_node_id(source_id)
     cid = _collection_id(collection_name)
 
     nodes: list[_NodeRow] = [

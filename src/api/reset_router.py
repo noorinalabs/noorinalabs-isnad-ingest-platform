@@ -163,8 +163,12 @@ def reset_full(
     """Full obliterate. Rejects the call unless the OBLITERATE token is supplied.
 
     The token is the API-boundary equivalent of the operator typing
-    ``OBLITERATE`` at the CLI prompt, so we record ``confirmation_method =
-    "interactive"`` for SIEM parity with a typed confirmation.
+    ``OBLITERATE`` at the CLI prompt, but it arrives over HTTP rather than a
+    TTY, so we record ``confirmation_method = "api"`` (issue #74) to keep
+    HTTP-driven resets cleanly attributable in SIEM, distinct from a typed
+    CLI confirmation (``"interactive"``). The value is fixed by this endpoint,
+    never read from the request body, so an API reset is honestly attributed
+    and a caller cannot spoof the channel.
     """
     if body.confirmation != OBLITERATE_TOKEN:
         raise HTTPException(
@@ -174,7 +178,7 @@ def reset_full(
 
     return _run_reset(
         ResetScope.full_scope(),
-        confirmation_method="interactive",
+        confirmation_method="api",
         dry_run=body.dry_run,
         resetter_factory=resetter_factory,
         data_dir=data_dir,
