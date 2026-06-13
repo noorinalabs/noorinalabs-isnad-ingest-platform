@@ -416,6 +416,63 @@ class TestEdgeLoading:
         rows = neo4j_client.execute_read("MATCH ()-[r:APPEARS_IN]->() RETURN count(r) AS cnt")
         assert rows[0]["cnt"] >= 0  # at least the edges were attempted
 
+    def test_appears_in_null_in_book_ordinal_does_not_abort_batch(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        """ingest-platform sibling of da#77: a null in-book ordinal must NOT abort
+        the APPEARS_IN write batch.
+
+        Scraped hadiths carry a null in-book ordinal until it is enriched. The
+        previous ``MERGE (h)-[:APPEARS_IN {hadith_number: row.hadith_number}]->(c)``
+        raised ``Cannot merge relationship using null property value`` and killed
+        the load for *every* hadith in the batch. The mock suite cannot enforce
+        this Neo4j rule, so it must be exercised against a real container.
+
+        Post-fix the positional props are SET after the MERGE under the canonical
+        key ``hadith_number_in_book`` (da#65), so a null ordinal yields an edge
+        with that key simply absent (Neo4j drops a property SET to null) instead
+        of aborting — and the non-null sibling in the same batch still loads.
+        """
+        staging, curated = _write_staging_data(tmp_path)
+        # The Collection node id must match what load_edges builds from
+        # ``{source_corpus}:{collection_name}`` — the corpus-prefixed staging form
+        # ("sunnah:bukhari" -> node "col:sunnah:bukhari").
+        _write_collections_parquet(
+            staging, [{**SAMPLE_COLLECTIONS[0], "collection_id": "sunnah:bukhari"}]
+        )
+        # One hadith with a null in-book ordinal (the da#77 trigger) alongside a
+        # normal one, both in the same collection / write batch.
+        _write_hadiths_parquet(
+            staging,
+            [
+                {**SAMPLE_HADITHS[0], "source_id": "bukhari:1", "hadith_number": None},
+                {**SAMPLE_HADITHS[1], "source_id": "bukhari:2", "hadith_number": 2},
+            ],
+        )
+        load_all_nodes(neo4j_client, staging, curated, strict=False)
+        edge_results = load_all_edges(neo4j_client, staging, curated, strict=False)
+
+        appears_in = next(r for r in edge_results if r.edge_type == "APPEARS_IN")
+        # Both edges created — the null-ordinal row did not abort the batch.
+        assert appears_in.created == 2
+
+        null_rows = neo4j_client.execute_read(
+            "MATCH (:Hadith {id: 'hdt:bukhari:1'})-[r:APPEARS_IN]->() "
+            "RETURN r.hadith_number_in_book AS num, keys(r) AS keys"
+        )
+        assert len(null_rows) == 1
+        # Neo4j does not persist a property SET to null, so the key is absent
+        # rather than the load erroring on the MERGE.
+        assert null_rows[0]["num"] is None
+        assert "hadith_number_in_book" not in null_rows[0]["keys"]
+
+        # The non-null sibling carries the ordinal under the canonical key.
+        nonnull_rows = neo4j_client.execute_read(
+            "MATCH (:Hadith {id: 'hdt:bukhari:2'})-[r:APPEARS_IN]->() "
+            "RETURN r.hadith_number_in_book AS num"
+        )
+        assert nonnull_rows[0]["num"] == 2
+
     def test_graded_by_edges(self, neo4j_client: Neo4jClient, tmp_path: Path) -> None:
         staging, curated = _write_staging_data(tmp_path)
         load_all_nodes(neo4j_client, staging, curated, strict=False)
