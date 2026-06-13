@@ -301,10 +301,14 @@ fail fast instead of every message DLQ-ing.
 make build-workers
 ```
 
-Tags as `dedup-worker:dev`, `enrich-worker:dev`,
-`normalize-worker:dev`, `ingest-worker:dev`. CI tags as
-`ghcr.io/noorinalabs/<worker>:sha-<short>` per the org image-tag
-contract (deploy `ghcr-publish.yml`, see references).
+Tags the per-stage local-dev images as `dedup-worker:dev`,
+`enrich-worker:dev`, `normalize-worker:dev`, `ingest-worker:dev` (used
+by the self-contained `docker-compose.yaml`). The **deployed** artifact
+is a single multi-worker image built from the top-level `Dockerfile`
+and published by this repo's `.github/workflows/ghcr-publish.yml` as
+`ghcr.io/noorinalabs/noorinalabs-isnad-ingest-platform:sha-<short>` (+
+`stg-<short>` / `stg-latest`) per the org image-tag contract; the
+compose `command:` selects the stage. See "Deploy procedure" below.
 
 ### Tests
 
@@ -364,39 +368,82 @@ additive format-fix commits is to be avoided.
 
 ## Deploy procedure
 
-> **Status:** Production deployment for the workers is **not yet
-> wired**. The deploy compose stack does not currently reference these
-> images. Cutover is tracked under `planned_issues 105–108` in
-> `ontology/repos/isnad-ingest-platform.yaml` and the multi-repo
-> coordination in `noorinalabs-main`.
+> **Status (ip#83, P4W6):** the staging path is now wired. The deploy
+> compose stack (`noorinalabs-deploy compose/docker-compose.prod.yml`)
+> defines the four worker services — `dedup-worker` / `enrich-worker` /
+> `normalize-worker` / `graph-load-worker` — **profile-gated**
+> (`profiles: ["pipeline"]`), all pulling the single multi-worker image
+> `ghcr.io/noorinalabs/noorinalabs-isnad-ingest-platform:${INGEST_IMAGE_TAG:-stg-latest}`
+> with each service's `command:` selecting its stage (deploy#440). This
+> repo's `.github/workflows/ghcr-publish.yml` publishes that image.
+> Bringing the workers up is a **deliberate, gated** `--profile pipeline`
+> step — it is **not** part of the normal app deploy (`deploy-stg.yml`).
 
-When the cutover lands, the deploy procedure will follow the
-established org pattern (mirror the `noorinalabs-deploy` and
-`noorinalabs-isnad-graph` runbooks):
+### Staging pipeline bring-up (gated)
 
-1. **Build + publish** — `ghcr-publish.yml` on push to
-   `deployments/phase-3/wave-N` produces `sha-<short>` and
-   `stg-<short>` + `stg-latest`. Promote to `prod-<short>` +
-   `prod-latest` only via the manual-approval workflow in
-   `noorinalabs-deploy` (org image-tag Contract v6, canonical comment
-   linked in references).
-2. **Pre-deploy** — `noorinalabs-deploy/scripts/db-migrate-gate.sh`
-   already handles user-service / isnad-graph; the ingest-worker
-   bringup needs an analogous "Neo4j connectivity probe" gate before
-   promotion. **Carry-forward.**
-3. **Stg cutover** — auto-deploy on push to wave branch, smoke via
-   `verify-deploy` workflow. Acceptance: workers show
-   `*_worker_starting` in logs, no DLQ traffic for 5 min.
-4. **Prod cutover** — manual approval on the `promote-prod` workflow.
-   Same acceptance battery as stg.
-5. **Post-cutover** — confirm one real batch flows raw → staged via
-   topic offsets and Neo4j MERGE counts (see triage commands below).
+The profiled workers are inert on a normal `docker compose up -d`. To
+bring the pipeline live on staging:
 
-The compose service definitions in
-`docker-compose.yaml` are the authoritative starting point — they
-already declare the env contract. The deploy compose just needs to
-import them with the right `external` networks once Kafka and Neo4j
-are on the prod stack.
+1. **Publish the worker image.** Run `Publish to GHCR`
+   (`ghcr-publish.yml`) via **workflow_dispatch on the active wave
+   branch** (or merge to `main`). This publishes `stg-<short>` +
+   `stg-latest`, so the compose default `INGEST_IMAGE_TAG=stg-latest`
+   resolves. Until this runs, the image is absent from GHCR and step 2
+   cannot pull it. Confirm:
+   ```bash
+   gh api /orgs/noorinalabs/packages/container/noorinalabs-isnad-ingest-platform/versions \
+     --jq '.[].metadata.container.tags[]' | grep -x stg-latest
+   ```
+2. **Bring the workers up on the box** (separate from app deploys):
+   ```bash
+   ssh noorinalabs-stg
+   cd <deploy-checkout>            # where compose/docker-compose.prod.yml lives
+   docker compose -p noorinalabs -f compose/docker-compose.prod.yml \
+     --env-file .env --profile pipeline up -d
+   ```
+   Use the **same `-p noorinalabs` project** as the app stack so the
+   workers join the same network (kafka/neo4j/postgres on `backend`).
+   Do **not** pass `--remove-orphans` here. **Requires Docker Compose
+   ≥ v2.20 on the box** — older Compose treats profile-activated
+   services as orphans, so a later app deploy's
+   `up -d --force-recreate --remove-orphans` (no `--profile`) would
+   reap the workers. Verify once: `docker compose version`.
+3. **Verify** workers are up, offsets advance, and the graph is written
+   (see the verification block below).
+
+```bash
+# (on the box) workers running + healthy
+docker compose -p noorinalabs -f compose/docker-compose.prod.yml --env-file .env \
+  --profile pipeline ps --format '{{.Name}}\t{{.Status}}'
+docker compose -p noorinalabs -f compose/docker-compose.prod.yml --env-file .env \
+  logs --tail=20 dedup-worker enrich-worker normalize-worker graph-load-worker
+#   expect: *_worker_starting, no repeated DLQ traffic
+
+# Kafka offsets advancing past 0 (pipeline.raw.landed → … → pipeline.normalize.done)
+docker exec <kafka-container> kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 --describe --all-groups
+
+# Graph-load landed nodes/edges in Neo4j
+docker exec <neo4j-container> cypher-shell -u neo4j -p "$NEO4J_PASSWORD" \
+  "MATCH (n) RETURN labels(n)[0] AS label, count(*) ORDER BY label;"
+```
+
+**Prod** follows the same shape once promoted: the deploy promote
+workflow writes `prod-<short>` / `prod-latest`; pin `INGEST_IMAGE_TAG`
+to a `prod-*` tag and run the identical gated `--profile pipeline up -d`
+on the prod box.
+
+> **Ordering / blockers for a correct E2E:** the APPEARS_IN
+> null-`hadith_number` MERGE-abort loader bug (ip#84) is **merged on
+> `deployments/phase-4/wave-6`** — required for a real scraped-data run
+> to land instead of aborting. The data half (produce + load real
+> narrator graph) is tracked separately (data-acquisition); this issue
+> is the infrastructure half (pipeline *runnable* on staging).
+
+The local-dev compose service definitions in `docker-compose.yaml`
+remain the authoritative env contract and build the per-stage images
+for self-contained local smoke tests; the deployed stack consumes the
+single multi-worker image built from the top-level `Dockerfile`.
 
 ---
 
