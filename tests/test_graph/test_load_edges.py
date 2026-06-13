@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from src.graph.load_edges import EdgeLoadResult, _build_chain_pairs, load_all_edges
+from src.graph.load_edges import (
+    _APPEARS_IN_QUERY,
+    EdgeLoadResult,
+    _build_chain_pairs,
+    load_all_edges,
+)
 from tests.test_graph.conftest import (
     MockNeo4jClient,
     write_hadiths,
@@ -210,6 +215,63 @@ class TestLoadAppearsIn:
         results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
         ai_result = results[2]
         assert ai_result.skipped >= 1
+
+    def test_null_hadith_number_not_skipped_and_loaded(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # ingest-platform sibling of da#77: a null in-book ordinal must NOT be
+        # filtered out (only source_id / collection_name guard the skip path) and
+        # must still reach the write batch. The mock cannot enforce the Neo4j
+        # MERGE-null rule — the structural guards below and the real-Neo4j
+        # integration test (test_graph_loading.py) cover that — but this asserts
+        # the loader keeps building the edge when the ordinal is null.
+        mock_client.set_read_results(
+            [
+                {
+                    "hadith_id": "hdt:h-1",
+                    "collection_id": "col:bukhari",
+                    "hadith_exists": True,
+                    "collection_exists": True,
+                },
+            ]
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "h-1",
+                    "collection_name": "bukhari",
+                    "book_number": 1,
+                    "chapter_number": 1,
+                    "hadith_number": None,  # the da#77 trigger
+                },
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        ai_result = results[2]
+        assert ai_result.skipped == 0
+        assert ai_result.created == 1
+
+    def test_appears_in_query_sets_ordinal_after_merge(self) -> None:
+        # da#77 / da#65: the in-book ordinal is null-unsafe inside a MERGE, so the
+        # positional props are SET after the MERGE under the canonical key
+        # ``hadith_number_in_book`` (mapped from ``row.hadith_number``) using the
+        # streaming path's coalesce-preserve contract.
+        assert (
+            "r.hadith_number_in_book = coalesce(row.hadith_number, r.hadith_number_in_book)"
+            in _APPEARS_IN_QUERY
+        )
+        # The legacy bare ``hadith_number`` edge key must never appear.
+        assert "hadith_number:" not in _APPEARS_IN_QUERY
+
+    def test_appears_in_merge_has_no_property_key_null_unsafe(self) -> None:
+        # da#77: positional props MUST be SET after the MERGE, never inside the
+        # MERGE relationship pattern — Neo4j aborts a MERGE on a null property,
+        # and scraped hadiths carry a null in-book ordinal until enrichment. Guard
+        # the MERGE line so the null-unsafe keyed form can't be reintroduced.
+        merge_line = next(line for line in _APPEARS_IN_QUERY.splitlines() if "MERGE (" in line)
+        assert merge_line.strip() == "MERGE (h)-[r:APPEARS_IN]->(c)"
+        assert "{" not in merge_line  # no inline property map on the MERGE pattern
 
 
 class TestLoadParallelOf:

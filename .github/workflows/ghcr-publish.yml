@@ -1,0 +1,130 @@
+# Publish the multi-worker container image to GitHub Container Registry (GHCR).
+#
+# Image:
+#   ghcr.io/noorinalabs/noorinalabs-isnad-ingest-platform   (all 4 worker stages)
+#
+# Satisfies the deploy#440 contract: a single image bundling
+# workers.{dedup,enrich,normalize,ingest}, tagged stg-*, whose pipeline stage
+# is selected by each compose service's `command:` (the profile-gated
+# dedup/enrich/normalize/graph-load workers in
+# noorinalabs-deploy compose/docker-compose.prod.yml).
+#
+# Triggers:
+#   - push to main                       — republishes :latest + :stg-* + :stg-latest
+#   - tag push (v* | phase*-wave*)        — release/wave tags
+#   - workflow_dispatch (manual)          — the GATED staging-publish path: lets the
+#                                           release coordinator publish stg-<short> +
+#                                           stg-latest from the active wave branch so
+#                                           the profiled workers can be brought up on
+#                                           the box BEFORE this branch merges to main
+#                                           (the main#601 E2E moment). See RUNBOOK.md
+#                                           "Deploy procedure".
+#
+# NO deploy fan-in. Unlike isnad-graph/user-service, this workflow does NOT fire
+# a repository_dispatch to noorinalabs-deploy:
+#   - deploy-stg.yml declares only `deploy-noorinalabs-isnad-graph` /
+#     `deploy-noorinalabs-user-service` dispatch types — there is no ingest handler.
+#   - The worker services are profile-gated (`profiles: ["pipeline"]`); deploy-stg's
+#     plain `docker compose ... up -d --remove-orphans` does NOT start them.
+# Bringing the workers up is a deliberate, gated `docker compose --profile pipeline
+# up -d` on the box — the runbook step, not an auto-deploy. See RUNBOOK.md.
+
+name: Publish to GHCR
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+      - "phase*-wave*"
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: noorinalabs/noorinalabs-isnad-ingest-platform
+
+jobs:
+  build-and-push:
+    name: Build and push (workers)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (ingest-platform)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          # Org image-tag contract (mirrors isnad-graph ghcr-publish.yml):
+          #   sha-<short>   — immutable, one per push; every event
+          #   latest        — mutable pointer; main-branch push + semver tags
+          #   stg-<short>   — immutable, stg namespace; push-to-main OR manual
+          #                   workflow_dispatch (the gated wave-branch publish)
+          #   stg-latest    — moving pointer to the newest stg-<short>; same enable
+          # prod-* tags are written by the noorinalabs-deploy promote workflow ONLY.
+          tags: |
+            type=ref,event=tag
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,prefix=stg-,format=short,enable=${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=stg-latest,enable=${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: .
+          file: Dockerfile
+          # amd64 only: the VPS is amd64, the workers are pure python/uv, and
+          # there is no arm64 consumer today. A cross-arch QEMU build would be
+          # ~10x slower for no benefit (same rationale as the isnad-graph
+          # frontend). Re-enable arm64 when ARM worker nodes arrive.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=workers
+          cache-to: type=gha,mode=max,scope=workers
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          # Scan by digest — guaranteed present immediately after push and
+          # immune to tag-resolution races (user-service#61 retro).
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## GHCR Publish (workers): ${{ job.status }}"
+            echo ""
+            echo "- **Ref:** ${{ github.ref_name }}"
+            echo "- **Image:** ${{ env.REGISTRY }}/${{ env.IMAGE }}"
+            echo "- **Platforms:** linux/amd64"
+            echo "- **SHA:** ${{ github.sha }}"
+            echo "- **Digest:** ${{ steps.build.outputs.digest }}"
+          } >> "$GITHUB_STEP_SUMMARY"

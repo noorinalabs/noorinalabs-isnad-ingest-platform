@@ -273,15 +273,28 @@ def _load_narrated(
 # 3. APPEARS_IN — hadith -> collection
 # ---------------------------------------------------------------------------
 
+# Identity of an APPEARS_IN edge is the (hadith, collection) PAIR — a hadith
+# appears in a given collection at most once. The positional props (book /
+# chapter / in-book ordinal) describe WHERE in that collection and are not part
+# of its key. They are therefore SET after the MERGE, never inside the MERGE
+# pattern (ingest-platform sibling of da#77): Neo4j refuses to MERGE a
+# relationship with a null property value, and scraped hadiths leave the in-book
+# ordinal null until it is enriched, so a keyed-on-properties MERGE aborts the
+# whole write batch on real scraped data. SET is null-safe.
+#
+# The SET uses the streaming ingest path's coalesce-preserve contract
+# (``r.<f> = coalesce(row.<f>, r.<f>)``) so the two ingest paths converge and a
+# re-run carrying a null ordinal never clobbers a value an earlier load set. The
+# canonical edge key is ``hadith_number_in_book`` (mapped from ``row.hadith_number``,
+# the in-book ordinal — Book 1 Hadith 1), not the bare ``hadith_number`` (da#65).
 _APPEARS_IN_QUERY = """\
 UNWIND $batch AS row
 MATCH (h:Hadith {id: row.hadith_id})
 MATCH (c:Collection {id: row.collection_id})
-MERGE (h)-[:APPEARS_IN {
-    book_number: row.book_number,
-    chapter_number: row.chapter_number,
-    hadith_number: row.hadith_number
-}]->(c)
+MERGE (h)-[r:APPEARS_IN]->(c)
+SET r.book_number = coalesce(row.book_number, r.book_number),
+    r.chapter_number = coalesce(row.chapter_number, r.chapter_number),
+    r.hadith_number_in_book = coalesce(row.hadith_number, r.hadith_number_in_book)
 """
 
 _APPEARS_IN_CHECK = """\
