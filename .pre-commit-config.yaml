@@ -12,8 +12,9 @@
 #   pre-commit (fast, every commit) — ruff-format + ruff-lint over the python
 #     surface, plus actionlint over the workflows (mirrors docs.yml's actionlint
 #     job; fast, no Docker).
-#   pre-push   (heavier, every push) — mypy strict + the pytest suite. These run
-#     the whole src/ + tests surface, so they're push-time not commit-time to
+#   pre-push   (heavier, every push) — mypy strict + the pytest suite + the
+#     pip-audit vulnerability scan. These run the whole src/ + tests surface (or
+#     resolve the full dependency set), so they're push-time not commit-time to
 #     keep the commit loop snappy while still catching everything before the
 #     code leaves the machine.
 #
@@ -28,6 +29,11 @@
 #     (`-m "not integration"`) — local push stays fast and Docker-free, matching
 #     what CI gates. Integration tests run via `make test-integration` when a
 #     Docker daemon is available.
+#   * ci.yml's `security-audit` job exports the frozen deps and runs
+#     `pip-audit --strict --desc`. The pre-push `pip-audit` local hook mirrors
+#     that command verbatim so the same vulnerability scan runs before code
+#     leaves the machine. (Caught by the #577 run-block scan in the sync-drift
+#     gate, which classifies tools invoked inside a `run: |` block.)
 #   * The heavier hooks use `uv run` so the exact pinned tools from uv.lock run
 #     locally, never a stray global mypy/pytest.
 #   * actionlint is pinned (rhysd/actionlint v1.7.12) so the workflow-lint that
@@ -56,11 +62,23 @@ repos:
       - id: actionlint
         name: actionlint (workflows)
 
-  # Heavier checks run at pre-push (mirror CI's mypy + the test job). Run as
-  # `local`/`system` hooks via `uv run` so the pinned tools from uv.lock are
-  # used and never drift from CI.
+  # Heavier checks run at pre-push (mirror CI's mypy + test + security-audit
+  # jobs). Run as `local`/`system` hooks via `uv run` so the pinned tools from
+  # uv.lock are used and never drift from CI.
   - repo: local
     hooks:
+      - id: pip-audit
+        name: pip-audit (pre-push)
+        # Mirrors ci.yml's `security-audit` job verbatim: export the frozen
+        # dependency set and audit it for known vulnerabilities. Heavier (needs
+        # `uv export` + the advisory DB), so it runs pre-push. `bash -c` wraps
+        # the export→audit pipeline as a single hook entry, matching the
+        # sibling isnad-graph form.
+        entry: bash -c 'uv export --no-hashes --frozen --no-emit-project > /tmp/requirements.txt && uv run pip-audit --strict --desc -r /tmp/requirements.txt'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
       - id: mypy
         name: mypy-strict (pre-push)
         entry: uv run mypy src/
