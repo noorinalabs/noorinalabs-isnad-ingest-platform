@@ -15,9 +15,15 @@ from typing import Any, Protocol
 
 from workers.lib.log import get_logger
 
-__all__ = ["PgCheckpoint", "_PgConnection"]
+__all__ = ["CHECKPOINT_TABLE", "PgCheckpoint", "_PgConnection"]
 
 _logger = get_logger("workers.checkpoint_pg")
+
+# Fully-qualified checkpoint table. Exported so out-of-worker callers that must
+# clear checkpoint rows by stage — the reprocess surface
+# (``src/pipeline/reprocess_adapters.py``) — reference the same table this
+# module's DDL creates instead of re-deriving the name.
+CHECKPOINT_TABLE = "pipeline.worker_checkpoint"
 
 # TTL sweep defaults (#42). The sweep is a no-op until the row count for a
 # stage exceeds ``_SWEEP_THRESHOLD_ROWS``; below that the index stays trivially
@@ -43,10 +49,10 @@ class _PgConnection(Protocol):
     def close(self) -> None: ...
 
 
-_DDL = """
+_DDL = f"""
 CREATE SCHEMA IF NOT EXISTS pipeline;
 
-CREATE TABLE IF NOT EXISTS pipeline.worker_checkpoint (
+CREATE TABLE IF NOT EXISTS {CHECKPOINT_TABLE} (
     stage      text        NOT NULL,
     batch_id   text        NOT NULL,
     marked_at  timestamptz NOT NULL DEFAULT now(),
@@ -54,7 +60,7 @@ CREATE TABLE IF NOT EXISTS pipeline.worker_checkpoint (
 );
 
 CREATE INDEX IF NOT EXISTS worker_checkpoint_marked_at_idx
-    ON pipeline.worker_checkpoint (marked_at);
+    ON {CHECKPOINT_TABLE} (marked_at);
 """
 
 
