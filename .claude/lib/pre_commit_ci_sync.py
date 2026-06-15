@@ -51,6 +51,22 @@ from pathlib import Path
 # Each kind maps to the keyword patterns that identify it on EITHER side
 # (pre-commit id/entry text or CI run/uses text). Patterns are substrings
 # matched case-insensitively against the relevant lines.
+#
+# `build` matches only real build-QUALITY GATES — a job whose purpose is to
+# fail the PR if the project does not build/compile (`build-and-validate`,
+# `build-and-test`, `npm run build`). It deliberately does NOT match bare
+# `docker build` / `docker buildx`: those are runtime image-MOVING (retag,
+# promote, publish to a registry, cold-rebuild dry-runs, digest resolution),
+# which is the deploy/publish job itself, not a quality gate a local
+# pre-commit hook could mirror. A bare `docker build` substring also matches
+# `docker buildx`, so a repo that uses buildx at runtime (deploy, the
+# image-publishing CI in isnad-graph / ingest-platform) would otherwise see a
+# permanent un-mirrorable `build` kind and the drift gate could never exit 0
+# (#576). If a repo ever adds a genuine docker-build-as-quality-gate, name
+# that job `build-and-validate` / `build-and-test` (or add an explicit
+# pattern) so it is mirror-tracked. Tightening lifted verbatim from the
+# deploy-rollout form (deploy#391, A.Idrissi) and canonicalized here so all
+# vendored child copies converge.
 _KIND_PATTERNS: dict[str, tuple[str, ...]] = {
     "ruff-format": ("ruff-format", "ruff format"),
     "ruff-lint": ("ruff check", "id: ruff", "- ruff"),
@@ -63,7 +79,7 @@ _KIND_PATTERNS: dict[str, tuple[str, ...]] = {
     "gitleaks": ("gitleaks",),
     "actionlint": ("actionlint",),
     "pip-audit": ("pip-audit", "pip audit"),
-    "build": ("build-and-validate", "build-and-test", "npm run build", "docker build"),
+    "build": ("build-and-validate", "build-and-test", "npm run build"),
 }
 
 # `ruff-lint` is a substring of nothing problematic, but `ruff format` also
@@ -104,16 +120,64 @@ def kinds_from_precommit(config_text: str) -> set[str]:
     return kinds
 
 
+# A `run:` (or `- run:`) key opening a YAML block scalar (`|`, `>`, plus the
+# chomping/indentation indicators `-`/`+`/digits, e.g. `|-`, `>2`). The body
+# of such a block is one or more MORE-indented continuation lines that carry
+# the actual shell — tools invoked there (`uv run pip-audit`, a multi-line
+# `ruff check` / `mypy` / `pytest`) must be classified too, else the gate has
+# a blind spot (#577).
+_RUN_BLOCK_OPEN_RE = re.compile(r"^(?P<indent>\s*)-?\s*run:\s*[|>][+\-0-9]*\s*$")
+
+
 def kinds_from_ci(workflow_text: str) -> set[str]:
-    """Canonical check-kinds a CI workflow enforces."""
+    """Canonical check-kinds a CI workflow enforces.
+
+    Classifies the line that names a `run:`/`uses:` step AND — for a
+    multi-line `run: |` / `run: >` block scalar — every continuation line in
+    that block's body (#577). Without the block-scan a tool invoked only on a
+    continuation line (e.g. `security-audit`'s `uv run pip-audit` under
+    `run: |`) is invisible to the classifier, so the drift gate silently fails
+    to require it be mirrored. The block ends at the first line whose
+    indentation is less-than-or-equal-to the `run:` key's own indent (a
+    sibling key or list item), matching YAML block-scalar scoping.
+    """
     kinds: set[str] = set()
+    run_block_indent: int | None = None
     for raw in workflow_text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+        stripped = raw.strip()
+
+        # Inside a multi-line run: block — classify body lines until the block
+        # closes (dedent to <= the run: key indent). Blank lines stay in the
+        # block (YAML block scalars permit interior blank lines).
+        if run_block_indent is not None:
+            if stripped:
+                line_indent = len(raw) - len(raw.lstrip())
+                if line_indent <= run_block_indent:
+                    run_block_indent = None  # block ended; fall through to re-handle
+                else:
+                    if not stripped.startswith("#"):
+                        kinds |= _classify_line(stripped)
+                    continue
+
+        if not stripped or stripped.startswith("#"):
             continue
+
+        # Open a run: block scalar? Record its key indent so the body scan
+        # above can scope the block. The `run:` key line itself carries no
+        # tool text (the `|`/`>` is the only payload), so nothing to classify.
+        block_match = _RUN_BLOCK_OPEN_RE.match(raw)
+        if block_match is not None:
+            run_block_indent = len(block_match.group("indent"))
+            continue
+
         # CI expresses checks as `run:` shell or `uses:` actions.
-        if "run:" in line or line.startswith("- run:") or "uses:" in line or line.startswith("-"):
-            kinds |= _classify_line(line)
+        if (
+            "run:" in stripped
+            or stripped.startswith("- run:")
+            or "uses:" in stripped
+            or stripped.startswith("-")
+        ):
+            kinds |= _classify_line(stripped)
     return kinds
 
 

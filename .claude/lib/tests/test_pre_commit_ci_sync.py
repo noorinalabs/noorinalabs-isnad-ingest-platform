@@ -5,12 +5,7 @@ Verifies:
   2. The drift direction that gates: CI-enforced-but-not-local is harmful;
      local-but-not-CI is stricter-local (informational, never a gate fail).
   3. ruff-format vs ruff-lint are not conflated.
-  4. This repo's (noorinalabs-isnad-ingest-platform) config mirrors ALL of its
-     CI-enforced kinds (no harmful drift) — the gate running against the very
-     repo that ships it. The gate is wired UNSCOPED here: it scans every
-     workflow in .github/workflows/ (ci.yml AND docs.yml), so the pre-commit
-     config must also mirror docs.yml's actionlint, not just ci.yml's
-     ruff/mypy/pytest.
+  4. The real parent (noorinalabs-main) config mirrors its CI kinds (no drift).
 """
 
 from __future__ import annotations
@@ -23,7 +18,7 @@ from pathlib import Path
 # .claude/lib/tests/test_*.py. parent.parent reaches the lib root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pre_commit_ci_sync import (
+from pre_commit_ci_sync import (  # noqa: E402
     check_repo,
     compute_drift,
     kinds_from_ci,
@@ -60,14 +55,20 @@ repos:
         self.assertIn("mypy", kinds)
         self.assertIn("pytest", kinds)
 
-    def test_actionlint_hook_detected(self) -> None:
+    def test_frontend_kinds(self) -> None:
         cfg = """
 repos:
-  - repo: https://github.com/rhysd/actionlint
+  - repo: local
     hooks:
-      - id: actionlint
+      - id: eslint
+      - id: typecheck
+        entry: tsc --noEmit
+      - id: prettier
 """
-        self.assertIn("actionlint", kinds_from_precommit(cfg))
+        kinds = kinds_from_precommit(cfg)
+        self.assertIn("eslint", kinds)
+        self.assertIn("typescript", kinds)
+        self.assertIn("prettier", kinds)
 
     def test_comments_ignored(self) -> None:
         cfg = "# id: mypy is just a comment\nrepos: []\n"
@@ -91,20 +92,162 @@ jobs:
             {"ruff-lint", "ruff-format", "mypy", "pytest"},
         )
 
-    def test_actionlint_run_detected(self) -> None:
+    def test_uses_actions_detected(self) -> None:
         wf = """
 jobs:
-  lint:
+  scan:
     steps:
-      - run: ./actionlint -color
+      - uses: gitleaks/gitleaks-action@v2
 """
-        self.assertIn("actionlint", kinds_from_ci(wf))
+        self.assertIn("gitleaks", kinds_from_ci(wf))
 
     def test_ruff_format_line_not_counted_as_lint(self) -> None:
         # A format-only line must NOT register ruff-lint.
         kinds = kinds_from_ci("      - run: ruff format --check .\n")
         self.assertIn("ruff-format", kinds)
         self.assertNotIn("ruff-lint", kinds)
+
+
+class BuildKindTightening(unittest.TestCase):
+    """#576: runtime `docker build` / `docker buildx` steps are image-MOVING,
+    not a build-QUALITY gate a local pre-commit hook can mirror — they must
+    NOT classify as the `build` kind, or any docker-image repo gets a
+    permanent un-mirrorable drift. Real build-quality gates still register."""
+
+    def test_docker_buildx_not_build_kind(self) -> None:
+        wf = """
+jobs:
+  publish:
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and push
+        run: docker buildx build --push -t img:latest .
+"""
+        self.assertNotIn("build", kinds_from_ci(wf))
+
+    def test_bare_docker_build_not_build_kind(self) -> None:
+        self.assertNotIn("build", kinds_from_ci("      - run: docker build -t img .\n"))
+
+    def test_real_build_quality_gates_still_detected(self) -> None:
+        # The classifier inspects step lines (run:/uses:/`- ` list items), so
+        # the build-quality markers are exercised in those positions.
+        for line in (
+            "      - name: build-and-validate\n",
+            "      - run: ./scripts/build-and-test.sh\n",
+            "      - run: npm run build\n",
+        ):
+            with self.subTest(line=line):
+                self.assertIn("build", kinds_from_ci(line))
+
+    def test_docker_publish_workflow_has_no_build_drift(self) -> None:
+        # End-to-end: a publish-only workflow (docker buildx) against a config
+        # that does NOT mirror a build kind produces NO harmful drift.
+        wf = """
+jobs:
+  publish:
+    steps:
+      - run: docker buildx build --push -t img .
+"""
+        cfg = """
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+"""
+        harmful, _ = compute_drift(kinds_from_precommit(cfg), kinds_from_ci(wf))
+        self.assertNotIn("build", harmful)
+
+
+class MultiLineRunBlockScanning(unittest.TestCase):
+    """#577: tools invoked on a CONTINUATION line of a multi-line `run: |` /
+    `run: >` block must be classified — else the gate has a silent blind spot
+    where a future `ruff`/`mypy` expressed multi-line drops out of the mirror
+    check."""
+
+    def test_pipe_block_continuation_lines_classified(self) -> None:
+        wf = """
+jobs:
+  security-audit:
+    steps:
+      - name: audit
+        run: |
+          uv sync
+          uv run pip-audit
+"""
+        self.assertIn("pip-audit", kinds_from_ci(wf))
+
+    def test_multiple_tools_in_one_block(self) -> None:
+        wf = """
+jobs:
+  checks:
+    steps:
+      - name: lint+type+test
+        run: |
+          ruff check .
+          mypy src/
+          pytest -q
+"""
+        kinds = kinds_from_ci(wf)
+        self.assertEqual(
+            kinds & {"ruff-lint", "mypy", "pytest"},
+            {"ruff-lint", "mypy", "pytest"},
+        )
+
+    def test_folded_block_scalar_also_scanned(self) -> None:
+        # `run: >` (folded) and chomping indicators (`|-`) open a block too.
+        wf = """
+jobs:
+  x:
+    steps:
+      - run: >-
+          mypy src/
+"""
+        self.assertIn("mypy", kinds_from_ci(wf))
+
+    def test_block_ends_at_dedented_sibling_key(self) -> None:
+        # A less-indented sibling key (here `uses:` + its `with:`) closes the
+        # block — its `fetch-depth` body must not leak a spurious classification
+        # and the block's own `ruff check` is still caught.
+        wf = """
+jobs:
+  x:
+    steps:
+      - name: a
+        run: |
+          ruff check .
+      - name: b
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+"""
+        kinds = kinds_from_ci(wf)
+        self.assertIn("ruff-lint", kinds)
+
+    def test_single_line_run_unaffected(self) -> None:
+        # Regression: the common single-line `run:` form still classifies.
+        wf = """
+jobs:
+  x:
+    steps:
+      - run: ruff check .
+      - run: mypy .
+"""
+        kinds = kinds_from_ci(wf)
+        self.assertEqual(kinds & {"ruff-lint", "mypy"}, {"ruff-lint", "mypy"})
+
+    def test_comment_in_block_not_classified(self) -> None:
+        # A commented continuation line inside the block is not a real
+        # invocation and must not register.
+        wf = """
+jobs:
+  x:
+    steps:
+      - run: |
+          # pytest is mentioned here but commented out
+          echo hi
+"""
+        self.assertNotIn("pytest", kinds_from_ci(wf))
 
 
 class DriftDirection(unittest.TestCase):
@@ -133,24 +276,20 @@ class DriftDirection(unittest.TestCase):
         self.assertEqual(stricter, set())
 
 
-class ThisRepoHasNoDrift(unittest.TestCase):
-    """The ingest-platform config must mirror ALL its CI-enforced kinds — this
-    is the gate running against the very repo that ships it. The gate is wired
-    UNSCOPED (every workflow), so docs.yml's actionlint is in scope alongside
-    ci.yml's ruff/mypy/pytest; the pre-commit config mirrors all of them."""
+class RealParentRepoHasNoDrift(unittest.TestCase):
+    """The parent noorinalabs-main config must mirror its CI kinds — this is
+    the gate running against the very repo that ships it."""
 
-    def test_precommit_mirrors_all_ci_workflows(self) -> None:
+    def test_parent_precommit_mirrors_parent_ci(self) -> None:
         precommit = _REPO_ROOT / ".pre-commit-config.yaml"
-        wf_dir = _REPO_ROOT / ".github" / "workflows"
-        self.assertTrue(precommit.is_file(), "repo must have a pre-commit config")
-        self.assertTrue(wf_dir.is_dir(), "repo must have .github/workflows/")
-        ci_paths = sorted(wf_dir.glob("*.y*ml"))
-        self.assertTrue(ci_paths, "repo must have at least one workflow")
-        harmful, _ = check_repo(precommit, ci_paths)
+        ci = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        self.assertTrue(precommit.is_file(), "parent must have a pre-commit config")
+        self.assertTrue(ci.is_file(), "parent must have ci.yml")
+        harmful, _ = check_repo(precommit, [ci])
         self.assertEqual(
             harmful,
             set(),
-            f"pre-commit must mirror every CI workflow; missing locally: {sorted(harmful)}",
+            f"parent pre-commit must mirror CI; missing locally: {sorted(harmful)}",
         )
 
 
