@@ -71,6 +71,7 @@ from neo4j import Driver, GraphDatabase  # noqa: E402
 from neo4j.exceptions import ServiceUnavailable  # noqa: E402
 from testcontainers.neo4j import Neo4jContainer  # noqa: E402
 
+from tests.integration import NEO4J_TEST_IMAGE  # noqa: E402
 from tests.workers.conftest import FakeConsumer, FakeProducer  # noqa: E402
 
 # ``_write_batch`` is reused from the unit suite so the on-the-wire
@@ -137,7 +138,7 @@ def neo4j_container_killable():
     container to force the driver into its retry loop — a session-scoped
     container would be dead for every test after the first.
     """
-    container = Neo4jContainer("neo4j:5-community", password=NEO4J_TEST_PASSWORD)
+    container = Neo4jContainer(NEO4J_TEST_IMAGE, password=NEO4J_TEST_PASSWORD)
     container.start()
     try:
         yield container
