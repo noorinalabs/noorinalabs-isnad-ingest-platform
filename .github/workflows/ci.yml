@@ -48,7 +48,11 @@ jobs:
       - name: Check for known vulnerabilities
         run: |
           uv export --no-hashes --frozen --no-emit-project > /tmp/requirements.txt
-          uv run pip-audit --strict --desc -r /tmp/requirements.txt
+          # GHSA-g75f-g53v-794x: bleach.linkify(parse_email=True) ReDoS — no
+          # upstream fix released. parse_email is not used anywhere in this repo
+          # (grep -rn parse_email is empty) → non-applicable. Tracked in
+          # noorinalabs-main#703; revisit each wave for an upstream fix.
+          uv run pip-audit --strict --desc --ignore-vuln GHSA-g75f-g53v-794x -r /tmp/requirements.txt
 
   test:
     runs-on: ubuntu-latest
