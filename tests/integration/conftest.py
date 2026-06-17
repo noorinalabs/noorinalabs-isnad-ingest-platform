@@ -7,6 +7,7 @@ from testcontainers.neo4j import Neo4jContainer
 from testcontainers.postgres import PostgresContainer
 
 from src.utils.neo4j_client import Neo4jClient
+from tests.integration import NEO4J_TEST_IMAGE
 
 NEO4J_TEST_PASSWORD = "testpassword123"
 
@@ -14,7 +15,7 @@ NEO4J_TEST_PASSWORD = "testpassword123"
 @pytest.fixture(scope="session")
 def neo4j_container():
     """Start a real Neo4j container for integration tests."""
-    container = Neo4jContainer("neo4j:5-community", password=NEO4J_TEST_PASSWORD)
+    container = Neo4jContainer(NEO4J_TEST_IMAGE, password=NEO4J_TEST_PASSWORD)
     with container as neo4j:
         yield neo4j
 

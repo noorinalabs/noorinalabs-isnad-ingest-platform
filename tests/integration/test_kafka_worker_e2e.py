@@ -68,6 +68,7 @@ from testcontainers.minio import MinioContainer  # noqa: E402
 from testcontainers.neo4j import Neo4jContainer  # noqa: E402
 
 from tests.factories import build_hadith_table  # noqa: E402
+from tests.integration import NEO4J_TEST_IMAGE  # noqa: E402
 from workers.enrich.processor import EnrichProcessor  # noqa: E402
 from workers.ingest.processor import IngestProcessor  # noqa: E402
 from workers.lib.message import PipelineMessage, serialize_message  # noqa: E402
@@ -108,7 +109,7 @@ def minio_container() -> Iterator[MinioContainer]:
 
 @pytest.fixture(scope="module")
 def neo4j_container_module() -> Iterator[Neo4jContainer]:
-    container = Neo4jContainer("neo4j:5-community", password=NEO4J_TEST_PASSWORD)
+    container = Neo4jContainer(NEO4J_TEST_IMAGE, password=NEO4J_TEST_PASSWORD)
     with container as neo4j:
         yield neo4j
 
