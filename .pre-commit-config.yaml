@@ -74,7 +74,11 @@ repos:
         # `uv export` + the advisory DB), so it runs pre-push. `bash -c` wraps
         # the export→audit pipeline as a single hook entry, matching the
         # sibling isnad-graph form.
-        entry: bash -c 'uv export --no-hashes --frozen --no-emit-project > /tmp/requirements.txt && uv run pip-audit --strict --desc -r /tmp/requirements.txt'
+        # --ignore-vuln GHSA-g75f-g53v-794x: bleach.linkify(parse_email=True)
+        # ReDoS — no upstream fix; parse_email unused in this repo → non-
+        # applicable. Tracked in noorinalabs-main#703; revisit each wave. Kept
+        # identical to ci.yml's security-audit invocation (local⇄CI parity).
+        entry: bash -c 'uv export --no-hashes --frozen --no-emit-project > /tmp/requirements.txt && uv run pip-audit --strict --desc --ignore-vuln GHSA-g75f-g53v-794x -r /tmp/requirements.txt'
         language: system
         pass_filenames: false
         always_run: true
