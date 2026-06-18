@@ -16,6 +16,10 @@ dependencies = [
     "structlog>=24.1",
     "python-dotenv>=1.0",
     "kaggle>=1.6",
+    # bleach is transitive via kaggle; pin a direct floor to clear the 6.3.0
+    # advisories GHSA-gj48-438w-jh9v + GHSA-8rfp-98v4-mmr6 (fixed in 6.4.0).
+    # See noorinalabs-main#703 / ingest#99.
+    "bleach>=6.4.0",
     "beautifulsoup4>=4.12",
     "lxml>=5.1",
     "tqdm>=4.66",
@@ -26,6 +30,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "python-jose[cryptography]>=3.3",
+    "starlette>=1.3.1",  # CVE-2026-54283 (urlencoded-form DoS) + CVE-2026-54282 (request.url host spoof); transitive via fastapi
+    "cryptography>=48.0.1",  # GHSA-537c-gmf6-5ccf (statically-linked OpenSSL in wheels); transitive via python-jose[cryptography]
 ]
 
 [project.scripts]
