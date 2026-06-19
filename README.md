@@ -26,8 +26,11 @@ pre-commit install --hook-type pre-push  # push-stage checks
 
 - **Commit stage** runs: `ruff-format` and `ruff-lint` (with `--fix`) over
   `src/ workers/ tests/`, plus `actionlint` over the workflows.
-- **Pre-push stage** runs: `mypy --strict` over `src/`, then the `pytest` suite
-  (unit only — `-m "not integration"`, so no Docker daemon is needed locally).
+- **Pre-push stage** runs: `pip-audit` (dependency-vulnerability scan, mirroring
+  `ci.yml`'s `security-audit` job — exports the frozen deps and runs
+  `pip-audit --strict --desc`), then `mypy --strict` over `src/`, then the
+  `pytest` suite (unit only — `-m "not integration"`, so no Docker daemon is
+  needed locally).
 
 These mirror `.github/workflows/ci.yml` so failures surface locally before a PR
 (org-wide local⇄CI parity, noorinalabs-main#684). Never bypass with
