@@ -126,6 +126,10 @@ pre-commit install --hook-type pre-push  # push-stage: pip-audit, mypy --strict,
 
 `.claude/lib/pre_commit_ci_sync.py` is the CI gate that fails the build if a check CI enforces is not mirrored in the pre-commit config. Run it locally with `python3 .claude/lib/pre_commit_ci_sync.py .`.
 
+### Shell environment
+
+The development shell is **zsh** (not bash). Write zsh-safe terminal commands and avoid bash-only idioms (`declare -A`, `${!arr[@]}`, unquoted `?`/`*` globs such as `…?ref=main` URLs). Prefer POSIX-portable constructs; reach for `bash -c '...'` explicitly only when bash is genuinely required. Canonical do/don't list: org `docs/TOOLCHAIN.md` "Shell environment" section + `ontology/conventions.md` in `noorinalabs-main`.
+
 ## Configuration
 
 Copy `.env.example` to `.env` for local runs. Workers read `KAFKA_BOOTSTRAP_SERVERS`, `PIPELINE_BUCKET`, `S3_ENDPOINT_URL` (set for MinIO/local, unset for B2 prod), and `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`; the `ingest-worker` additionally needs `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`.
