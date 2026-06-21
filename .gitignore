@@ -64,3 +64,6 @@ logs/
 
 .claude/.consulted/
 .claude/.librarian-consulted/
+
+# Per-session, machine-local handoff (Stop-hook churn — not transferable state)
+.claude/memory/session_handoff.md
