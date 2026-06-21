@@ -43,6 +43,10 @@ exclude = [
 exclude_path = [
   ".venv",
   "node_modules",
+  # Project memory is dense append-only note prose with [[wikilinks]] and
+  # bare relative refs — excluded from the doc linters (markdown/cspell/lychee),
+  # same call as feedback_log/trust_matrix.
+  ".claude/memory",
 ]
 
 # A relative link with no matching file is the failure we DO want to surface.

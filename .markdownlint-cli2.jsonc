@@ -51,6 +51,9 @@
   ],
   "ignores": [
     "node_modules/**",
-    ".venv/**"
+    ".venv/**",
+    // Project memory is dense append-only note prose (names, SHAs,
+    // [[wikilinks]], Arabic) — same exclusion call as feedback_log/trust_matrix.
+    ".claude/memory/**"
   ]
 }
