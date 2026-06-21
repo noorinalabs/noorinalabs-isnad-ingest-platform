@@ -10,8 +10,9 @@
 #
 # Stage split:
 #   pre-commit (fast, every commit) — ruff-format + ruff-lint over the python
-#     surface, plus actionlint over the workflows (mirrors docs.yml's actionlint
-#     job; fast, no Docker).
+#     surface, actionlint over the workflows (mirrors docs.yml's actionlint job),
+#     and cspell over the authored-prose docs (mirrors docs.yml's spellcheck
+#     job); all fast, no Docker.
 #   pre-push   (heavier, every push) — mypy strict + the pytest suite + the
 #     pip-audit vulnerability scan. These run the whole src/ + tests surface (or
 #     resolve the full dependency set), so they're push-time not commit-time to
@@ -40,9 +41,9 @@
 #     docs.yml enforces in CI also runs locally — keeping the UNSCOPED sync-drift
 #     gate (which scans every workflow, docs.yml included) green.
 #
-# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest, actionlint present
-# on both sides) is enforced in CI by `.claude/lib/pre_commit_ci_sync.py` — if a
-# future edit drops one side, that gate fails the build.
+# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest, actionlint, cspell
+# present on both sides) is enforced in CI by `.claude/lib/pre_commit_ci_sync.py`
+# — if a future edit drops one side, that gate fails the build.
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -61,6 +62,28 @@ repos:
     hooks:
       - id: actionlint
         name: actionlint (workflows)
+
+  # cspell mirrors the `Spellcheck (cspell)` CI job in docs.yml (the sync-drift
+  # gate now classifies the `cspell` kind — noorinalabs-main#684 — so a
+  # CI-enforced spell gate not mirrored here turns the gate red, same contract as
+  # actionlint above). New domain vocabulary then fails `pre-commit run` locally
+  # instead of only surfacing as a CI red after push. Pinned to v8.4.0 of
+  # cspell-cli to match the exact cspell the `streetsidesoftware/cspell-action@…
+  # v8.4.0` CI step bundles — same engine + dictionaries on both sides.
+  # `language: node`, so pre-commit provisions its own node/cspell env (no system
+  # cspell required).
+  #
+  # `files` is the regex equivalent of the CI action's authored-prose glob set
+  # (the team charter, RUNBOOK, workers README); `--config .cspell.json` reuses
+  # the same dictionaries + ignore rules CI loads, so a word that passes locally
+  # passes in CI and vice-versa.
+  - repo: https://github.com/streetsidesoftware/cspell-cli
+    rev: v8.4.0
+    hooks:
+      - id: cspell
+        name: cspell
+        args: ["--no-must-find-files", "--no-progress", "--no-summary", "--config", ".cspell.json"]
+        files: ^(\.claude/team/charter\.md|RUNBOOK\.md|workers/README\.md)$
 
   # Heavier checks run at pre-push (mirror CI's mypy + test + security-audit
   # jobs). Run as `local`/`system` hooks via `uv run` so the pinned tools from
