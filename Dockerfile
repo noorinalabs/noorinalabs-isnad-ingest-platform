@@ -17,7 +17,12 @@
 # compose (docker-compose.yaml); this top-level Dockerfile is the one the
 # deployed stack consumes.
 
-FROM python:3.14-slim
+# Digest-pinned base + in-image apt upgrade (charter § Base Image Pinning,
+# noorinalabs-main#735 / #744). The @sha256 digest freezes the starting layer
+# against floating-tag drift; the `apt-get -y upgrade` below closes the second
+# failure mode (within-tag package drift — the shape isnad-graph#853 hit). The
+# digest is kept in lockstep with the sibling repos' python:3.14-slim pin.
+FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -26,6 +31,7 @@ ENV PYTHONUNBUFFERED=1 \
     INGEST_CHECKPOINT_BACKEND=pg
 
 RUN apt-get update \
+ && apt-get -y upgrade \
  && apt-get install -y --no-install-recommends build-essential curl \
  && rm -rf /var/lib/apt/lists/*
 

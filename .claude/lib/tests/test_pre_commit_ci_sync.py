@@ -355,6 +355,64 @@ class DriftDirection(unittest.TestCase):
         self.assertEqual(stricter, set())
 
 
+class DockerfileBasePinKindClassification(unittest.TestCase):
+    """The #744 base-pin gate is a real kind: a CI run invoking
+    check_dockerfile_base_pin.py and a pre-commit hook running the same script —
+    so a CI base-pin gate with no local mirror is harmful drift, not silence."""
+
+    def test_dockerfile_base_pin_ci_run_classified(self) -> None:
+        wf = """
+jobs:
+  base-pin:
+    steps:
+      - run: python3 .claude/lib/check_dockerfile_base_pin.py Dockerfile workers/dedup/Dockerfile
+"""
+        self.assertIn("dockerfile-base-pin", kinds_from_ci(wf))
+
+    def test_dockerfile_base_pin_precommit_id_classified(self) -> None:
+        cfg = """
+repos:
+  - repo: local
+    hooks:
+      - id: dockerfile-base-pin
+        entry: python3 .claude/lib/check_dockerfile_base_pin.py Dockerfile
+"""
+        self.assertIn("dockerfile-base-pin", kinds_from_precommit(cfg))
+
+    def test_ci_base_pin_with_precommit_mirror_no_drift(self) -> None:
+        wf = """
+jobs:
+  base-pin:
+    steps:
+      - run: python3 .claude/lib/check_dockerfile_base_pin.py Dockerfile
+"""
+        cfg = """
+repos:
+  - repo: local
+    hooks:
+      - id: dockerfile-base-pin
+        entry: python3 .claude/lib/check_dockerfile_base_pin.py Dockerfile
+"""
+        harmful, _ = compute_drift(kinds_from_precommit(cfg), kinds_from_ci(wf))
+        self.assertNotIn("dockerfile-base-pin", harmful)
+
+    def test_ci_base_pin_without_precommit_mirror_is_harmful(self) -> None:
+        wf = """
+jobs:
+  base-pin:
+    steps:
+      - run: python3 .claude/lib/check_dockerfile_base_pin.py Dockerfile
+"""
+        cfg = """
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+"""
+        harmful, _ = compute_drift(kinds_from_precommit(cfg), kinds_from_ci(wf))
+        self.assertIn("dockerfile-base-pin", harmful)
+
+
 class RealParentRepoHasNoDrift(unittest.TestCase):
     """The parent noorinalabs-main config must mirror its CI kinds — this is
     the gate running against the very repo that ships it."""
