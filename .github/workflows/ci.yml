@@ -71,6 +71,27 @@ jobs:
         env:
           ENVIRONMENT: test
 
+  base-pin:
+    # Charter-prose→code gate rolled in by #744 (built in noorinalabs-main#735):
+    # every Dockerfile FROM must be digest-pinned (image:tag@sha256:<digest>) AND
+    # carry the matching distro upgrade (apt for these slim images). Invokes the
+    # stdlib-only `.claude/lib/check_dockerfile_base_pin.py` — no uv/node needed —
+    # and is mirrored by the `dockerfile-base-pin` pre-commit hook. The
+    # precommit-ci-sync gate classifies this kind, so dropping either the CI step
+    # or the local hook is harmful drift. Kept as a single-line `run:` so the
+    # line-scanner sync classifier registers the script name. Covers the top-level
+    # multi-worker image and the four per-stage worker images. (No fixture-realism
+    # step: this repo carries no Arabic NER/graph-load data fixtures.)
+    name: Base-image pin + upgrade
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dockerfile base-image pin + upgrade
+        run: python3 .claude/lib/check_dockerfile_base_pin.py Dockerfile workers/dedup/Dockerfile workers/enrich/Dockerfile workers/ingest/Dockerfile workers/normalize/Dockerfile
+
   precommit-ci-sync:
     # Phase-3 end-state criterion #6 (noorinalabs-main#327): the local
     # .pre-commit-config.yaml MUST mirror what CI enforces, so a developer's
@@ -90,9 +111,13 @@ jobs:
           python-version: "3.12"
       - name: Pre-commit ⇄ CI sync-drift gate
         run: python3 .claude/lib/pre_commit_ci_sync.py .
-      - name: Install pytest for the gate's unit tests
-        # The gate itself is stdlib-only; its tests use pytest. This job does NOT
+      - name: Install pytest for the .claude/lib unit tests
+        # The gates are stdlib-only; their tests use pytest. This job does NOT
         # `uv sync` (it does not need the project deps), so install pytest alone.
         run: python3 -m pip install --quiet pytest
-      - name: Sync-drift gate unit tests
-        run: python3 -m pytest .claude/lib/tests/test_pre_commit_ci_sync.py -q
+      - name: .claude/lib unit tests (sync-drift gate + base-pin check)
+        # The main suite is testpaths = ["tests"], so the stdlib-only gate tests
+        # under .claude/lib/tests/ (sync-drift classifier + check_dockerfile_base_pin)
+        # are not collected by the `test` job. Run the whole dir here so both
+        # gates' tests gate the PR.
+        run: python3 -m pytest .claude/lib/tests/ -q

@@ -24,7 +24,7 @@ kind tokens so they compare:
 
     ruff-lint, ruff-format, mypy, pytest, eslint, typescript, prettier,
     terraform-fmt, gitleaks, actionlint, astro-check, pip-audit, build,
-    cspell
+    cspell, dockerfile-base-pin
 
 Unknown tools are ignored (neither side gates on a kind we can't classify),
 which keeps the gate conservative — it never fails on something it doesn't
@@ -91,6 +91,17 @@ _KIND_PATTERNS: dict[str, tuple[str, ...]] = {
     # new domain vocabulary then failed only after push. Patterns cover the action
     # ref, the bundled-CLI step name, and the generic job/step word.
     "cspell": ("cspell", "spellcheck", "streetsidesoftware/cspell"),
+    # `dockerfile-base-pin` is the charter-prose→code gate rolled in by #744
+    # (built in noorinalabs-main#735): every Dockerfile FROM must be digest-pinned
+    # AND carry the matching distro upgrade. ci.yml's `base-pin` job and the
+    # `dockerfile-base-pin` pre-commit hook both invoke
+    # `.claude/lib/check_dockerfile_base_pin.py`, so classifying this kind makes
+    # the local mirror mandatory — dropping either side is harmful drift, not
+    # silence (#684 parity). The `fixture-realism` kind is intentionally NOT
+    # classified here: this repo carries no Arabic NER/graph-load DATA fixtures
+    # (Arabic appears only inline in tests/test_parse/*.py unit sources), so there
+    # is no fixture-realism gate on either side to mirror.
+    "dockerfile-base-pin": ("check_dockerfile_base_pin", "dockerfile-base-pin"),
 }
 
 # `ruff-lint` is a substring of nothing problematic, but `ruff format` also
