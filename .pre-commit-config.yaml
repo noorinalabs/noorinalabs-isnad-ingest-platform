@@ -41,9 +41,19 @@
 #     docs.yml enforces in CI also runs locally — keeping the UNSCOPED sync-drift
 #     gate (which scans every workflow, docs.yml included) green.
 #
-# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest, actionlint, cspell
-# present on both sides) is enforced in CI by `.claude/lib/pre_commit_ci_sync.py`
-# — if a future edit drops one side, that gate fails the build.
+# CI parity note — structural-ontology (#116):
+#   The `structural-ontology` CI workflow runs
+#   `scripts/structural_ontology.py check` as a staleness gate for the
+#   committed structural index (`ontology/structural/{code-graph.json,llms.txt}`).
+#   The `structural-ontology-staleness` pre-commit hook below mirrors that step
+#   (commit-stage, stdlib-only, fast). The sync-drift gate classifies the
+#   `structural-ontology` kind (#684 parity), so dropping either side turns the
+#   gate red. Regenerate with `python3 scripts/structural_ontology.py emit`.
+#
+# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest, actionlint, cspell,
+# dockerfile-base-pin, structural-ontology present on both sides) is enforced in
+# CI by `.claude/lib/pre_commit_ci_sync.py` — if a future edit drops one side,
+# that gate fails the build.
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -88,6 +98,26 @@ repos:
   # Local stdlib gates + the heavier pre-push checks.
   - repo: local
     hooks:
+      # Structural ontology staleness gate (#116, C×T2 / noorinalabs-main#820).
+      # Mirrors the `structural-ontology` CI workflow's `check` step: regenerates
+      # the committed structural index (ontology/structural/{code-graph.json,
+      # llms.txt}) with the OWNED generator in noorinalabs-main and fails if it
+      # has drifted from the source tree. The generator is consumed from the
+      # sibling noorinalabs-main checkout (auto-discovered via the standard org
+      # layout, or $ONTOLOGY_GEN_LIB) — it is NOT vendored here. Both the
+      # pre-commit hook and the CI check use the same
+      # `scripts/structural_ontology.py check` entry point (local⇄CI parity,
+      # noorinalabs-main#684). uv/pip install NOT needed — the wrapper and
+      # generator are stdlib-only. Regenerate with
+      # `python3 scripts/structural_ontology.py emit` and commit the result.
+      - id: structural-ontology-staleness
+        name: structural-ontology-staleness
+        entry: python3 scripts/structural_ontology.py check
+        language: system
+        pass_filenames: false
+        files: ^(src/.*\.py|workers/.*\.py|scripts/structural_ontology\.py|ontology/structural/.*)$
+        stages: [pre-commit]
+
       # Base-image pinning gate (charter tech-decisions.md § Base Image Pinning,
       # noorinalabs-main#735 / #744). Every Dockerfile FROM must be digest-pinned
       # (image:tag@sha256:<digest>) AND carry the matching distro upgrade (apt for
