@@ -24,6 +24,7 @@ import pytest
 
 from src.parse.schemas import HADITH_SCHEMA
 from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
+from src.utils.grade import normalize_grade
 from tests.workers.conftest import FakeS3Client, build_hadith_parquet
 from workers.dedup.processor import DedupProcessor
 from workers.enrich.processor import HADITH_TOPICS_SCHEMA, EnrichProcessor
@@ -333,10 +334,19 @@ class TestNormalizeProcessor:
         narrators = self._read_nodes(object_store, nxt.b2_path, "narrators.parquet")
         assert len(narrators) >= 2, f"expected multiple narrators extracted, got {narrators}"
 
-        # Grading node only for h2 (the one with a grade set).
+        # Grading node only for h2 (the one with a grade set). The normalized
+        # display grade rides alongside the raw one, mirroring the batch
+        # loader (ip#119).
         gradings = self._read_nodes(object_store, nxt.b2_path, "gradings.parquet")
         assert len(gradings) == 1
         assert gradings[0]["props"]["grade"] == "sahih"
+        assert gradings[0]["props"]["grade_normalized"] == "sahih"
+
+        # Every Hadith node carries grade_normalized too: "sahih" for h2,
+        # "unknown" for h1 (no grade) — always set, matching the batch path.
+        hadiths = self._read_nodes(object_store, nxt.b2_path, "hadiths.parquet")
+        by_grade = {h["props"]["grade_normalized"] for h in hadiths}
+        assert by_grade == {"sahih", "unknown"}
 
         # Edges present for APPEARS_IN (per-hadith) + GRADED_BY (h2) +
         # TRANSMITTED_TO (N-1 narrators in h1's chain) + NARRATED (first
@@ -347,6 +357,83 @@ class TestNormalizeProcessor:
         assert edge_labels.count("GRADED_BY") == 1
         assert "NARRATED" in edge_labels
         assert "TRANSMITTED_TO" in edge_labels
+
+    def test_grade_normalized_mirrors_batch_normalize_grade(
+        self,
+        object_store: ObjectStore,
+        sample_message: PipelineMessage,
+        hadith_row: Any,
+    ) -> None:
+        """Streaming ``grade_normalized`` must equal the batch load path's.
+
+        da#153 item #4 / ip#119: the batch loader
+        (``noorinalabs-data-acquisition/src/graph/load_nodes.py``) writes
+        ``grade_normalized = normalize_grade(grade)`` on both the Hadith and
+        Grading nodes. The streaming normalize worker must converge on the
+        SAME value for every raw grade form — English, bare Arabic, voweled
+        Arabic, the ``li-ghayrihi`` qualifier, an unrecognised value, and a
+        missing grade. We assert against the shared ``normalize_grade`` (the
+        verbatim mirror of the batch function) AND pin the expected canonical
+        value so a drift in either copy is caught.
+        """
+        from src.parse.identity import hadith_node_id  # noqa: PLC0415 — local to the test
+
+        # (raw grade written to the row, expected canonical grade_normalized).
+        cases = [
+            ("sahih", "sahih"),
+            ("صحيح", "sahih"),  # bare Arabic
+            ("صَحِيحٌ", "sahih"),  # voweled Arabic — normalize_arabic collapses it
+            ("da'if", "daif"),
+            ("ضعيف", "daif"),
+            ("صحيح لغيره", "sahih_li_ghayrihi"),  # qualifier beats bare sahih
+            ("totally made up", "unknown"),  # conservative fallback
+            (None, "unknown"),  # no grade at all
+        ]
+        rows = []
+        for i, (raw, _expected) in enumerate(cases):
+            row = hadith_row(source_id=f"g{i}", matn_en=f"matn {i}")
+            row["grade"] = raw
+            rows.append(row)
+        _seed(object_store, sample_message.b2_path, build_hadith_parquet(rows))
+
+        nxt = NormalizeProcessor(object_store)(sample_message)
+
+        hadiths = self._read_nodes(object_store, nxt.b2_path, "hadiths.parquet")
+        gradings = self._read_nodes(object_store, nxt.b2_path, "gradings.parquet")
+        # Index nodes by source-id-derived hadith id so we can pair raw→normalized.
+        hadith_by_id = {h["id"]: h for h in hadiths}
+        grading_by_hid = {g["props"]["hadith_id"]: g for g in gradings}
+
+        for i, (raw, expected) in enumerate(cases):
+            hid = hadith_node_id(f"g{i}")
+            hprops = hadith_by_id[hid]["props"]
+            # Streaming value == shared normalize_grade == pinned expected.
+            assert hprops["grade_normalized"] == normalize_grade(raw) == expected, (
+                f"Hadith grade_normalized parity failed for raw={raw!r}"
+            )
+            # A Grading node exists iff a grade is present; when it does, its
+            # grade_normalized must match too (never "unknown", since a grade
+            # is present — except the deliberately-bogus value).
+            if raw:
+                gprops = grading_by_hid[hid]["props"]
+                assert gprops["grade_normalized"] == normalize_grade(raw) == expected, (
+                    f"Grading grade_normalized parity failed for raw={raw!r}"
+                )
+            else:
+                assert hid not in grading_by_hid, "no Grading node without a grade"
+
+    def test_grade_normalized_is_landing_eligible_at_ingest(self) -> None:
+        """The emitted ``grade_normalized`` must survive the ingest allow-list.
+
+        Emitting it in normalize is only half of parity (ip#119): the ingest
+        stage drops any prop outside ``NODE_PROPERTY_MAP``. Guard that the key
+        is allow-listed on both node labels the batch path writes it to, so a
+        future allow-list edit can't silently re-open the parity gap.
+        """
+        from workers.ingest.schema import NODE_PROPERTY_MAP
+
+        assert "grade_normalized" in NODE_PROPERTY_MAP["Hadith"]
+        assert "grade_normalized" in NODE_PROPERTY_MAP["Grading"]
 
     def test_hadith_id_matches_batch_loader_no_doubled_corpus(
         self,

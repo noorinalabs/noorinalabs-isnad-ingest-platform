@@ -75,6 +75,7 @@ import pyarrow.parquet as pq
 from src.parse.identity import hadith_node_id
 from src.parse.narrator_extraction import extract_narrator_mentions
 from src.parse.schemas import HADITH_SCHEMA
+from src.utils.grade import normalize_grade
 from workers.lib.log import get_logger
 from workers.lib.message import PipelineMessage
 from workers.lib.object_store import ObjectStore
@@ -223,6 +224,13 @@ def _fan_out_row(row: dict[str, Any]) -> tuple[list[_NodeRow], list[_EdgeRow]]:
                 "isnad_raw_ar": row.get("isnad_raw_ar"),
                 "isnad_raw_en": row.get("isnad_raw_en"),
                 "grade": row.get("grade"),
+                # Normalized display grade alongside the verbatim raw value,
+                # mirroring the batch load path (src/graph/load_nodes.py):
+                # a corpus may store the grade as raw Arabic / mixed script,
+                # which is not a stable key to filter or display on (da#148).
+                # Always emitted so it matches the batch node byte-for-byte —
+                # an absent/blank grade normalizes to "unknown" (ip#119).
+                "grade_normalized": normalize_grade(row.get("grade")),
                 "source_corpus": source_corpus,
                 "sect": sect,
                 "collection_name": collection_name,
@@ -354,6 +362,11 @@ def _fan_out_row(row: dict[str, Any]) -> tuple[list[_NodeRow], list[_EdgeRow]]:
                 props={
                     "hadith_id": hid,
                     "grade": grade,
+                    # Normalized display grade (da#148), mirroring the batch
+                    # Grading loader (src/graph/load_nodes.py). Reached only
+                    # when a grade is present, so it is a real HadithGrade
+                    # value, never "unknown" here (ip#119).
+                    "grade_normalized": normalize_grade(grade),
                     "scholar_name": collection_name,
                 },
             )
