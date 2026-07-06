@@ -67,6 +67,7 @@ from testcontainers.kafka import KafkaContainer  # noqa: E402
 from testcontainers.minio import MinioContainer  # noqa: E402
 from testcontainers.neo4j import Neo4jContainer  # noqa: E402
 
+from src.parse.identity import hadith_node_id  # noqa: E402
 from tests.factories import build_hadith_table  # noqa: E402
 from tests.integration import NEO4J_TEST_IMAGE  # noqa: E402
 from workers.enrich.processor import EnrichProcessor  # noqa: E402
@@ -284,8 +285,12 @@ def test_enrich_normalize_ingest_e2e_through_kafka_topics(
         )
     )
 
-    # End-to-end assertion: the hadith node landed in Neo4j.
-    expected_hid = f"hdt:{source}:h-1"
+    # End-to-end assertion: the hadith node landed in Neo4j. The id must be the
+    # canonical one the production ingest path MERGEs — route through the single
+    # source of truth (``hadith_node_id``) rather than hardcoding, so this cannot
+    # drift from the ``hdt:<source_id>`` rule again (#63/#72 collapsed the earlier
+    # ``hdt:<corpus>:<source_id>`` double-prefix; the batch loader keys the same).
+    expected_hid = hadith_node_id("h-1")
     with driver.session() as session:
         record = session.run(
             "MATCH (n:Hadith {id: $id}) RETURN n.matn_en AS matn_en",
