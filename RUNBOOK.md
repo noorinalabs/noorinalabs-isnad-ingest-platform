@@ -251,26 +251,34 @@ uv run python scripts/e2e_pipeline_run.py \
 This uses the real `neo4j` driver and the rows MERGE into the live graph;
 the script then runs the same validate count queries against it.
 
-**Verified live (2026-06-10):** ran against a real `neo4j:5-community`
-container — identical end state to the in-process capture (15 nodes /
-11 relationships; zero DLQ). Independent `cypher-shell` confirmed the
-hadith content landed and is queryable, e.g.:
+**Verified live (2026-06-10, re-verified 2026-07-05 / P8W24):** ran against a
+real `neo4j:5-community` container — identical end state to the in-process
+capture (15 nodes / 11 relationships; zero DLQ). Independent query confirmed
+the hadith content landed under the canonical id and is queryable, e.g.:
 
 ```
-MATCH (h:Hadith {id:'hdt:sunnah:sunnah:bukhari:1:1'})-[:APPEARS_IN]->(c:Collection)
+MATCH (h:Hadith {id:'hdt:sunnah:bukhari:1:1'})-[:APPEARS_IN]->(c:Collection)
 RETURN h.matn_en, h.sect, c.id;
 # → "Actions are judged by intentions…", "sunni", "col:bukhari"
 ```
 
-> **Known divergence (tracked):** the streaming `_hadith_id` prepends
-> `source_corpus` to a `source_id` that the parsers already corpus-prefix
-> (`generate_source_id`), so the Hadith id lands as
-> `hdt:sunnah:sunnah:bukhari:1:1` (corpus doubled) — whereas the batch
-> loader `src/graph/load_nodes.py` keys the same hadith as
-> `hdt:sunnah:bukhari:1:1`. The two ingest paths would MERGE the same
-> hadith as two nodes. Caught by this E2E's realistic corpus-prefixed
-> fixture (the Kafka E2E's `h-1` fixture masks it). Flagged for a
-> follow-up defect; normalize is the side to fix.
+The P8W24 re-verification additionally drove the **full four-stage chain across
+real Kafka topics** (not just the in-process capture) and observed the
+per-topic log-end offset advance stage-by-stage
+(`raw.landed → dedup.done → enrich.done → normalize.done`, each 0→1) — see
+`docs/streaming_e2e_verification_p8w24.md`.
+
+> **Double-prefix hazard — RESOLVED (#63 / #72).** An earlier streaming
+> `_hadith_id` prepended `source_corpus` to a `source_id` the parsers already
+> corpus-prefix, landing the Hadith id as `hdt:sunnah:sunnah:bukhari:1:1`
+> (corpus doubled) and splitting one hadith across two nodes vs the batch
+> loader's `hdt:sunnah:bukhari:1:1`. Both ingest paths now route through the
+> single `hadith_node_id()` helper (`src/parse/identity.py`), which is
+> idempotent and collapses the doubled corpus, so streaming normalize and the
+> batch loader `src/graph/load_nodes.py` key the same hadith to exactly one id.
+> Covered by `tests/workers/test_processors.py::TestNormalizeProcessor::
+> test_hadith_id_matches_batch_loader_no_doubled_corpus` and the live P8W24
+> Kafka E2E above.
 
 ---
 
