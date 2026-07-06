@@ -78,6 +78,13 @@ NODE_PROPERTY_MAP: dict[str, list[str]] = {
         "isnad_raw_en",
         "grade",
         "grade_composite",
+        # Normalized display grade the normalize stage derives from the raw
+        # ``grade`` via src.utils.grade.normalize_grade — mirrors the batch
+        # load path so streamed and batch loads land identical values
+        # (ip#119 / da#153 item #4). Ingest-only like ``grade`` (the
+        # isnad-graph model exposes only ``grade_composite``); declared in
+        # that repo's scripts/ingest-extras.yaml so schema-drift stays green.
+        "grade_normalized",
         "source_corpus",
         "sect",
         "collection_name",
@@ -135,6 +142,11 @@ NODE_PROPERTY_MAP: dict[str, list[str]] = {
         "hadith_id",
         "scholar_name",
         "grade",
+        # Normalized display grade (see the Hadith note above) — the batch
+        # Grading loader writes it too, so streamed Grading nodes converge on
+        # the same value (ip#119). Ingest-only; declared in isnad-graph's
+        # scripts/ingest-extras.yaml under nodes.Grading.
+        "grade_normalized",
         "methodology_school",
         "era",
     ],
