@@ -104,6 +104,24 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=workers
           cache-to: type=gha,mode=max,scope=workers
+          # Exclude the `base` stage — the digest-pinned FROM plus the in-image
+          # `apt-get -y upgrade` — from the layer cache, so the upgrade actually
+          # RUNS on every publish instead of being replayed as a cached no-op.
+          #
+          # This is the ip#127 / noorinalabs-main#947 fix. Without it the GHA
+          # cache served the apt layer (`#11 CACHED`) and the charter's declared
+          # defense against within-tag package drift (tech-decisions.md § Base
+          # Image Pinning) never executed: this publish sat red on `main` for
+          # five days while 10 HIGH OS CVEs — all with published fixes — went
+          # uninstalled, the package versions frozen to the 07-06 build. The
+          # same frozen-layer shape is confirmed in noorinalabs-data-acquisition
+          # (run 29138030830, a GREEN publish, `#11 CACHED` on its apt layer).
+          #
+          # `check_dockerfile_base_pin.py` proves the upgrade LINE is present.
+          # It cannot prove the line RUNS. This flag is what makes it run, and
+          # the two must be changed together: renaming or dropping the `base`
+          # stage silently re-freezes the layer while that gate stays green.
+          no-cache-filter: base
 
       - name: Run Trivy vulnerability scan
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0

@@ -4,7 +4,15 @@
 # Digest-pinned base + in-image apt upgrade (charter § Base Image Pinning,
 # noorinalabs-main#735 / #744). Digest kept in lockstep with the top-level
 # Dockerfile and the sibling repos' python:3.14-slim pin.
-FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061
+#
+# The stage name `base` is LOAD-BEARING, not cosmetic: ghcr-publish.yml passes
+# `no-cache-filter: base` to docker/build-push-action, which is what forces the
+# `apt-get -y upgrade` below to actually RUN on every publish instead of being
+# replayed from the buildx GHA cache as a no-op (ip#127 / noorinalabs-main#947).
+# Renaming or removing this stage silently re-freezes the apt layer, and
+# check_dockerfile_base_pin.py will stay green while it happens — that gate
+# proves the upgrade LINE exists, not that it RUNS.
+FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061 AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
