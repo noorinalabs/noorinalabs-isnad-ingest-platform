@@ -102,60 +102,40 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # DO NOT DELETE THESE TWO LINES.
-          #
-          # They look like a dead speed optimisation — nothing cache-hits today.
-          # They are not an optimisation at all. They are the CONTROL ARM of a
-          # standing experiment: the regression detector for the
-          # `no-cache-filters` line below.
-          #
-          # Nothing cache-hits because the Dockerfile is still SINGLE-STAGE, so
-          # `base` is not a preamble — it IS the whole image, and excluding it
-          # uncaches every layer. Expect a publish log with NO `CACHED` lines at
-          # all; that is correct, not anomalous. And note what follows: TODAY THE
-          # SECURITY PROPERTY DOES NOT REST ON THE FILTER AT ALL. Nothing could
-          # serve a stale apt layer even if the filter were dead. The filter only
-          # starts carrying weight once ip#132 splits this into base/builder/
-          # runtime. These two lines are how we find out whether it still works on
-          # the day it starts to matter:
-          #
-          #   cache import KEPT, filter later breaks (stage renamed / the action
-          #     renames its input / someone "tidies" the key back to the singular
-          #     `no-cache-filter`) -> buildx serves the frozen apt layer -> stale
-          #     packages -> TRIVY GOES RED -> we find out that day.
-          #
-          #   cache import DELETED, filter breaks the same way -> there is nothing
-          #     to serve, apt re-runs anyway -> TRIVY GOES GREEN -> the dead flag
-          #     is INVISIBLE. It rots until the split lands, cache config gets
-          #     re-added "for speed", and the filter turns out to have been broken
-          #     the whole time with nothing to say so.
-          #
-          # That second row is this very bug in a new costume: a guard that goes
-          # quiet in exactly the case it exists to catch. Keeping the detector
-          # costs ~15s of layer work per publish — measured by STAGE-STEP LABEL on
-          # run 29139568901: `[base 2/9] RUN apt-get … upgrade` CACHED in control
-          # vs 11.8s under the filter; `[base 6/9] RUN uv … pip install` 3.5s.
-          # That is a very cheap standing detector for a defect that sat
-          # undetected on `main` for five days.
-          #
           # Cite layers by their `[base N/9]` label, NEVER by buildx vertex number
           # (`#10`, `#18`, …): those are assigned in solve order and are NOT stable
-          # across builds. In that run's CONTROL arm the apt layer is `#12`, not
-          # `#10` — `#10` is a COPY. Anyone grepping `#10` in the control log to
-          # check our work would find a COPY and conclude the proof was fabricated.
-          # An unstable identifier can manufacture a refutation as easily as a
-          # confirmation.
+          # across builds. In the ip#127 proof run's CONTROL arm the apt layer is
+          # `#12`, not `#10` — `#10` is a COPY. Anyone grepping `#10` in the
+          # control log to check our work would find a COPY and conclude the proof
+          # was fabricated. An unstable identifier can manufacture a refutation as
+          # easily as a confirmation.
           #
-          # OPEN QUESTION, and it stays open: whether ip#132's split ALSO restores
-          # caching as a speed win. It may not (`builder` derives FROM `base`, so
-          # un-caching the parent may cascade to its children) or it may (BuildKit
-          # chains a child's key on the parent's RESULT, so a re-run apt producing
-          # a byte-identical layer still lets children hit — and when a package
-          # genuinely upgrades, the parent digest changes and children correctly
-          # rebuild, which is the behaviour you want). Nobody's belief goes in this
-          # comment; measure it in ip#132. Either answer is a fact about SPEED and
-          # licenses deleting nothing — the detector above is why these two lines
-          # stay regardless.
+          # These two CANNOT cache-hit in the shipped config: the filter uncaches
+          # `base`, and `base` is the whole image. They are retained as the CONTROL
+          # ARM, not as an optimisation. If the filter ever silently breaks (stage
+          # renamed, action input renamed, key "tidied" back to singular),
+          # `cache-from` serves the frozen apt layer again, the old packages
+          # return, and Trivy goes RED — that is how we find out. Without it the
+          # same breakage is SILENT: nothing to serve, apt re-runs anyway, publish
+          # goes green, and the dead flag rots until ip#132's split makes it
+          # load-bearing. `cache-to` is what keeps that detector alive — GHA cache
+          # entries evict when unused, so dropping ONLY `cache-to` silently empties
+          # `cache-from` and kills the guard without touching it.
+          #
+          # Do NOT price this decision. Every number attached to it so far was
+          # measured in the wrong arm: the ~80s was a `load: true` harness
+          # artefact; the 3.5s uv saving exists only in the CONTROL arm and is
+          # unreachable once the filter is on. The real cost is the `cache-to`
+          # export, which is UNMEASURED — the proof harness omitted `cache-to` by
+          # design. Read it off the first real publish, and do not delete these
+          # lines on the strength of a number until then.
+          #
+          # Whether ip#132's base/builder/runtime split restores caching is
+          # UNTESTED and genuinely open: `builder` derives FROM `base`, so
+          # un-caching the parent may cascade to its children — or may not, since
+          # BuildKit keys a child on the parent's RESULT, and a re-run apt that
+          # changes nothing produces an identical layer. Measure it. Do not write
+          # down either answer.
           cache-from: type=gha,scope=workers
           cache-to: type=gha,mode=max,scope=workers
           # Exclude the `base` stage — the digest-pinned FROM plus the in-image
