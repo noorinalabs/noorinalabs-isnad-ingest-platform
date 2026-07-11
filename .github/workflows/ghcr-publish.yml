@@ -173,12 +173,22 @@ jobs:
           # exactly the five days we lived through. That latency is the reason the
           # ip#137 tripwire exists.
           #
-          # Whether ip#132's base/builder/runtime split restores caching is
-          # UNTESTED and genuinely open: `builder` derives FROM `base`, so
-          # un-caching the parent may cascade to its children — or may not, since
-          # BuildKit keys a child on the parent's RESULT, and a re-run apt that
-          # changes nothing produces an identical layer. Measure it. Do not write
-          # down either answer.
+          # HOW TO REVERT THIS, AND WHEN. `mode=min` exports only the final image's
+          # layers. It was chosen because the detector SURVIVES it — measured with a
+          # control (run 29142720595): reading a `mode=min` cache with no filter,
+          # `[base 2/2]` still comes back CACHED, so a broken filter can still be
+          # served a frozen layer. That is the ONLY property that justifies it.
+          #
+          # So the revert condition is precise: if `[base 2/2]` ever fails to come
+          # back CACHED on a NO-FILTER read of a `mode=min` cache, then `mode=min`
+          # has silently emptied what `cache-from` reads, the frozen-layer condition
+          # can no longer be created, and THE DETECTOR IS DEAD WHILE EVERYTHING STAYS
+          # GREEN. Go back to `mode=max` and pay the export. Nothing will tell you
+          # this happened — it is the same silence the filter itself failed in — so
+          # it is checked by the ip#137 staleness tripwire, not by watching for red.
+          #
+          # This condition lives HERE, not in the merged PR body: whoever next edits
+          # this line will read the comment and will not read PR #138.
           cache-from: type=gha,scope=workers
           cache-to: type=gha,mode=min,scope=workers
           # Exclude the `base` stage — the digest-pinned FROM plus the in-image
