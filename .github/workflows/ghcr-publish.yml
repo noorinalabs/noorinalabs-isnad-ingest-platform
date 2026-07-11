@@ -102,8 +102,84 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Cite layers by their `[base N/9]` label, NEVER by buildx vertex number
+          # (`#10`, `#18`, …): those are assigned in solve order and are NOT stable
+          # across builds. In the ip#127 proof run's CONTROL arm the apt layer is
+          # `#12`, not `#10` — `#10` is a COPY. Anyone grepping `#10` in the
+          # control log to check our work would find a COPY and conclude the proof
+          # was fabricated. An unstable identifier can manufacture a refutation as
+          # easily as a confirmation.
+          #
+          # These two CANNOT cache-hit in the shipped config: the filter uncaches
+          # `base`, and `base` is the whole image. They are retained as the CONTROL
+          # ARM, not as an optimisation. If the filter ever silently breaks (stage
+          # renamed, action input renamed, key "tidied" back to singular),
+          # `cache-from` serves the frozen apt layer again, the old packages
+          # return, and Trivy goes RED — that is how we find out. Delete it and the
+          # same breakage is SILENT: nothing to serve, apt re-runs anyway, publish
+          # goes green, and a WORKING filter and a COMPLETELY BROKEN one produce
+          # byte-identical evidence. That is the self-certifying configuration this
+          # PR exists to destroy.
+          #
+          # BOTH lines are load-bearing. `cache-to` is what keeps the detector
+          # alive — GHA cache entries evict when unused, so dropping ONLY
+          # `cache-to` silently empties `cache-from` and kills the guard without
+          # touching it. Keep both or keep neither.
+          #
+          # Do NOT price this decision. Every number attached to it was measured in
+          # the wrong arm: the ~80s was a `load: true` harness artefact; the 3.5s
+          # uv saving exists only in the CONTROL arm and is unreachable once the
+          # filter is on; "zero" ignored `cache-to` entirely. What IS measured:
+          # `cache-from` costs 0.1s (`importing cache manifest from gha … DONE
+          # 0.1s`, treatment arm) — effectively free. What is NOT: `cache-to
+          # mode=max` re-exports every layer on every publish, and the proof
+          # harness omitted `cache-to` BY DESIGN, so nobody has priced it. Read it
+          # off the first real publish; do not delete these lines on the strength
+          # of a number until then.
+          #
+          # Honest sensitivity — do not oversell this detector: it is NOT an
+          # instant tripwire. With `cache-to` writing fresh layers each publish, a
+          # newly-broken filter serves a layer at most one publish old, and the
+          # gate only reddens once a NEW fixed HIGH CVE lands against it. Days to
+          # weeks — which is exactly the five days we just lived through.
+          #
+          # Whether ip#132's base/builder/runtime split restores caching is
+          # UNTESTED and genuinely open: `builder` derives FROM `base`, so
+          # un-caching the parent may cascade to its children — or may not, since
+          # BuildKit keys a child on the parent's RESULT, and a re-run apt that
+          # changes nothing produces an identical layer. Measure it. Do not write
+          # down either answer.
           cache-from: type=gha,scope=workers
           cache-to: type=gha,mode=max,scope=workers
+          # Exclude the `base` stage — the digest-pinned FROM plus the in-image
+          # `apt-get -y upgrade` — from the layer cache, so the upgrade actually
+          # RUNS on every publish instead of being replayed as a cached no-op.
+          #
+          # This is the ip#127 / noorinalabs-main#947 fix. Without it the GHA
+          # cache served the apt layer (`#11 CACHED`) and the charter's declared
+          # defense against within-tag package drift (tech-decisions.md § Base
+          # Image Pinning) never executed: this publish sat red on `main` for
+          # five days while 10 HIGH OS CVEs — all with published fixes — went
+          # uninstalled, the package versions frozen to the 07-06 build. The
+          # same frozen-layer shape is confirmed in noorinalabs-data-acquisition
+          # (run 29138030830, a GREEN publish, `#11 CACHED` on its apt layer).
+          #
+          # `check_dockerfile_base_pin.py` proves the upgrade LINE is present.
+          # It cannot prove the line RUNS. This flag is what makes it run, and
+          # the two must be changed together: renaming or dropping the `base`
+          # stage silently re-freezes the layer while that gate stays green.
+          #
+          # PLURAL. `no-cache-filters` is the ACTION INPUT; `--no-cache-filter`
+          # (singular) is the docker CLI flag the action emits FROM this list
+          # (action.yml declares only `no-cache-filters`; src/context.ts:72 reads
+          # it, :163 loops it into `--no-cache-filter`). The singular spelling is
+          # NOT a declared input — GitHub Actions does not fail on an undeclared
+          # `with:` key, it drops it with a warning annotation, and actionlint
+          # does not validate third-party input schemas. So the singular form
+          # type-checks, lints, and builds green while the list stays EMPTY and
+          # buildx never sees the flag: an inert fix that leaves the apt layer
+          # frozen and makes it look like the cache was not the problem.
+          no-cache-filters: base
 
       - name: Run Trivy vulnerability scan
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0

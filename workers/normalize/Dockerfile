@@ -4,7 +4,15 @@
 # Digest-pinned base + in-image apt upgrade (charter § Base Image Pinning,
 # noorinalabs-main#735 / #744). Digest kept in lockstep with the top-level
 # Dockerfile and the sibling repos' python:3.14-slim pin.
-FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061
+#
+# This image is NOT published. ghcr-publish.yml builds only the top-level
+# `Dockerfile` (`file: Dockerfile`) and never touches this one, so the
+# `no-cache-filters: base` exclusion that forces the apt upgrade to re-run on
+# every publish does NOT apply here — a local `docker build` of this file will
+# happily serve the apt layer from the local cache. The stage is named `base`
+# purely to keep the five Dockerfiles one shape (ip#127); do not read the name
+# as evidence that anything un-caches it.
+FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061 AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
