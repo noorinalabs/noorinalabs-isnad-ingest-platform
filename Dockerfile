@@ -24,9 +24,12 @@
 # digest is kept in lockstep with the sibling repos' python:3.14-slim pin.
 #
 # The stage name `base` is LOAD-BEARING, not cosmetic: ghcr-publish.yml passes
-# `no-cache-filter: base` to docker/build-push-action, which is what forces the
-# `apt-get -y upgrade` below to actually RUN on every publish instead of being
-# replayed from the buildx GHA cache as a no-op (ip#127 / noorinalabs-main#947).
+# `no-cache-filters: base` (PLURAL — that is the action input; the singular
+# `no-cache-filter` is the docker CLI flag and is NOT a declared input, so it is
+# silently dropped) to docker/build-push-action. That exclusion is what forces
+# the `apt-get -y upgrade` below to actually RUN on every publish instead of
+# being replayed from the buildx GHA cache as a no-op (ip#127 / main#947).
+#
 # Renaming or removing this stage silently re-freezes the apt layer, and
 # check_dockerfile_base_pin.py will stay green while it happens — that gate
 # proves the upgrade LINE exists, not that it RUNS.

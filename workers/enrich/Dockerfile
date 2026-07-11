@@ -5,13 +5,13 @@
 # noorinalabs-main#735 / #744). Digest kept in lockstep with the top-level
 # Dockerfile and the sibling repos' python:3.14-slim pin.
 #
-# The stage name `base` is LOAD-BEARING, not cosmetic: ghcr-publish.yml passes
-# `no-cache-filter: base` to docker/build-push-action, which is what forces the
-# `apt-get -y upgrade` below to actually RUN on every publish instead of being
-# replayed from the buildx GHA cache as a no-op (ip#127 / noorinalabs-main#947).
-# Renaming or removing this stage silently re-freezes the apt layer, and
-# check_dockerfile_base_pin.py will stay green while it happens — that gate
-# proves the upgrade LINE exists, not that it RUNS.
+# This image is NOT published. ghcr-publish.yml builds only the top-level
+# `Dockerfile` (`file: Dockerfile`) and never touches this one, so the
+# `no-cache-filters: base` exclusion that forces the apt upgrade to re-run on
+# every publish does NOT apply here — a local `docker build` of this file will
+# happily serve the apt layer from the local cache. The stage is named `base`
+# purely to keep the five Dockerfiles one shape (ip#127); do not read the name
+# as evidence that anything un-caches it.
 FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061 AS base
 
 ENV PYTHONUNBUFFERED=1 \

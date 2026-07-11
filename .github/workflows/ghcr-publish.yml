@@ -121,7 +121,18 @@ jobs:
           # It cannot prove the line RUNS. This flag is what makes it run, and
           # the two must be changed together: renaming or dropping the `base`
           # stage silently re-freezes the layer while that gate stays green.
-          no-cache-filter: base
+          #
+          # PLURAL. `no-cache-filters` is the ACTION INPUT; `--no-cache-filter`
+          # (singular) is the docker CLI flag the action emits FROM this list
+          # (action.yml declares only `no-cache-filters`; src/context.ts:72 reads
+          # it, :163 loops it into `--no-cache-filter`). The singular spelling is
+          # NOT a declared input — GitHub Actions does not fail on an undeclared
+          # `with:` key, it drops it with a warning annotation, and actionlint
+          # does not validate third-party input schemas. So the singular form
+          # type-checks, lints, and builds green while the list stays EMPTY and
+          # buildx never sees the flag: an inert fix that leaves the apt layer
+          # frozen and makes it look like the cache was not the problem.
+          no-cache-filters: base
 
       - name: Run Trivy vulnerability scan
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
