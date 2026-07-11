@@ -102,21 +102,24 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # NOTE — these two are currently INERT, and that is a known, temporary
-          # consequence of the line below. The Dockerfile is still SINGLE-STAGE,
-          # so `base` is not a small preamble: it IS the whole image. Excluding
-          # `base` from the cache therefore uncaches every layer, and nothing
-          # ever reads what `cache-to` writes. Measured on the ip#127 proof run
-          # (29139568901): with the filter on, every vertex rebuilds — including
-          # the uv install (#18, 43.4s) — for ~80s of extra build per publish.
+          # NOTE — these two are currently INERT. MEASURED, not inferred, on the
+          # ip#127 proof run (29139568901): with `no-cache-filters: base` on,
+          # EVERY vertex rebuilds — including the uv install (#18, 43.4s) — so
+          # nothing reads what `cache-to` writes. ~80s extra build per publish.
+          # Expect a publish log with NO `CACHED` lines at all; that is correct,
+          # not anomalous. The Dockerfile is still SINGLE-STAGE, so `base` is not
+          # a preamble: it IS the whole image.
           #
-          # They are kept, not deleted, because ip#132 splits this into a real
-          # base/builder/runtime image. At that point `base` becomes a thin apt
-          # layer again, `builder` (the expensive uv install) caches normally,
-          # and this config goes back to doing its job. Deleting it here would
-          # mean re-adding it there — two workflow churns to end up where we
-          # started. If ip#132 is ever abandoned, DELETE THESE TWO LINES: dead
-          # cache config that looks alive is how the next reader gets misled.
+          # Kept rather than deleted because ip#132 splits this into
+          # base/builder/runtime. But do NOT assume that split restores caching:
+          # `builder` would derive FROM `base`, and un-caching a parent stage may
+          # well invalidate its children anyway — in which case the expensive uv
+          # layer still rebuilds and these two lines stay dead. THAT IS UNTESTED.
+          # Settle it by measurement (build twice against a scratch cache scope,
+          # with and without the filter, and read whether the uv vertex reports
+          # CACHED) before anyone writes down that the split fixed the cache.
+          # If it does not, DELETE THESE TWO LINES — dead config that looks alive
+          # is how the next reader gets misled.
           cache-from: type=gha,scope=workers
           cache-to: type=gha,mode=max,scope=workers
           # Exclude the `base` stage — the digest-pinned FROM plus the in-image
