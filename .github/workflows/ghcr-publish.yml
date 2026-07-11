@@ -102,24 +102,34 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # NOTE — these two are currently INERT. MEASURED, not inferred, on the
-          # ip#127 proof run (29139568901): with `no-cache-filters: base` on,
-          # EVERY vertex rebuilds — including the uv install (#18, 43.4s) — so
-          # nothing reads what `cache-to` writes. ~80s extra build per publish.
-          # Expect a publish log with NO `CACHED` lines at all; that is correct,
-          # not anomalous. The Dockerfile is still SINGLE-STAGE, so `base` is not
-          # a preamble: it IS the whole image.
+          # NOTE — these two are currently INERT. The Dockerfile is still
+          # SINGLE-STAGE, so `base` is not a preamble: it IS the whole image, and
+          # excluding it from the cache uncaches every layer. Expect a publish log
+          # with NO `CACHED` lines at all; that is correct, not anomalous.
           #
-          # Kept rather than deleted because ip#132 splits this into
-          # base/builder/runtime. But do NOT assume that split restores caching:
-          # `builder` would derive FROM `base`, and un-caching a parent stage may
-          # well invalidate its children anyway — in which case the expensive uv
-          # layer still rebuilds and these two lines stay dead. THAT IS UNTESTED.
-          # Settle it by measurement (build twice against a scratch cache scope,
-          # with and without the filter, and read whether the uv vertex reports
-          # CACHED) before anyone writes down that the split fixed the cache.
-          # If it does not, DELETE THESE TWO LINES — dead config that looks alive
-          # is how the next reader gets misled.
+          # Measured on the ip#127 proof run (29139568901), by STAGE-STEP LABEL:
+          #
+          #   [base 2/9] RUN apt-get … upgrade   control: CACHED   filter: 11.8s
+          #   [base 6/9] RUN uv … pip install    control: CACHED   filter:  3.5s
+          #
+          # Cite layers by their `[base N/9]` label, NEVER by buildx vertex number
+          # (`#10`, `#18`, …): those are assigned in solve order and are NOT stable
+          # across builds — the same `#N` is a different layer in a different run.
+          #
+          # So the cost of un-caching is ~15s of layer work (job wall-clock delta
+          # was ~12s). It is NOT the ~80s an earlier revision of this comment
+          # claimed: that number came from `exporting to docker image format`,
+          # which exists only because the proof harness used `load: true`. A real
+          # `push: true` publish never runs that step.
+          #
+          # Which means the thing these two lines would protect — the uv install —
+          # is a 3.5s layer. Caching it buys ~3.5s. Whether ip#132's
+          # base/builder/runtime split would even restore that is UNTESTED, and
+          # doubtful: `builder` derives FROM `base`, so un-caching the parent
+          # plausibly cascades to its children anyway. Do not write down that the
+          # split fixes the cache until someone measures it. If it does not — or if
+          # 3.5s is judged not worth the config — DELETE THESE TWO LINES. Dead
+          # config that looks alive is how the next reader gets misled.
           cache-from: type=gha,scope=workers
           cache-to: type=gha,mode=max,scope=workers
           # Exclude the `base` stage — the digest-pinned FROM plus the in-image
