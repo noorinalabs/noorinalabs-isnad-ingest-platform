@@ -115,20 +115,33 @@ jobs:
           # ARM, not as an optimisation. If the filter ever silently breaks (stage
           # renamed, action input renamed, key "tidied" back to singular),
           # `cache-from` serves the frozen apt layer again, the old packages
-          # return, and Trivy goes RED — that is how we find out. Without it the
+          # return, and Trivy goes RED — that is how we find out. Delete it and the
           # same breakage is SILENT: nothing to serve, apt re-runs anyway, publish
-          # goes green, and the dead flag rots until ip#132's split makes it
-          # load-bearing. `cache-to` is what keeps that detector alive — GHA cache
-          # entries evict when unused, so dropping ONLY `cache-to` silently empties
-          # `cache-from` and kills the guard without touching it.
+          # goes green, and a WORKING filter and a COMPLETELY BROKEN one produce
+          # byte-identical evidence. That is the self-certifying configuration this
+          # PR exists to destroy.
           #
-          # Do NOT price this decision. Every number attached to it so far was
-          # measured in the wrong arm: the ~80s was a `load: true` harness
-          # artefact; the 3.5s uv saving exists only in the CONTROL arm and is
-          # unreachable once the filter is on. The real cost is the `cache-to`
-          # export, which is UNMEASURED — the proof harness omitted `cache-to` by
-          # design. Read it off the first real publish, and do not delete these
-          # lines on the strength of a number until then.
+          # BOTH lines are load-bearing. `cache-to` is what keeps the detector
+          # alive — GHA cache entries evict when unused, so dropping ONLY
+          # `cache-to` silently empties `cache-from` and kills the guard without
+          # touching it. Keep both or keep neither.
+          #
+          # Do NOT price this decision. Every number attached to it was measured in
+          # the wrong arm: the ~80s was a `load: true` harness artefact; the 3.5s
+          # uv saving exists only in the CONTROL arm and is unreachable once the
+          # filter is on; "zero" ignored `cache-to` entirely. What IS measured:
+          # `cache-from` costs 0.1s (`importing cache manifest from gha … DONE
+          # 0.1s`, treatment arm) — effectively free. What is NOT: `cache-to
+          # mode=max` re-exports every layer on every publish, and the proof
+          # harness omitted `cache-to` BY DESIGN, so nobody has priced it. Read it
+          # off the first real publish; do not delete these lines on the strength
+          # of a number until then.
+          #
+          # Honest sensitivity — do not oversell this detector: it is NOT an
+          # instant tripwire. With `cache-to` writing fresh layers each publish, a
+          # newly-broken filter serves a layer at most one publish old, and the
+          # gate only reddens once a NEW fixed HIGH CVE lands against it. Days to
+          # weeks — which is exactly the five days we just lived through.
           #
           # Whether ip#132's base/builder/runtime split restores caching is
           # UNTESTED and genuinely open: `builder` derives FROM `base`, so
