@@ -110,38 +110,68 @@ jobs:
           # was fabricated. An unstable identifier can manufacture a refutation as
           # easily as a confirmation.
           #
-          # These two CANNOT cache-hit in the shipped config: the filter uncaches
-          # `base`, and `base` is the whole image. They are retained as the CONTROL
-          # ARM, not as an optimisation. If the filter ever silently breaks (stage
-          # renamed, action input renamed, key "tidied" back to singular),
-          # `cache-from` serves the frozen apt layer again, the old packages
-          # return, and Trivy goes RED — that is how we find out. Delete it and the
-          # same breakage is SILENT: nothing to serve, apt re-runs anyway, publish
-          # goes green, and a WORKING filter and a COMPLETELY BROKEN one produce
-          # byte-identical evidence. That is the self-certifying configuration this
-          # PR exists to destroy.
+          # These two CANNOT cache-hit in the shipped config. NOTE THE REASON HAS
+          # CHANGED: it used to be "`base` is the whole image" (true when this was
+          # single-stage). Since ip#132 split it, `base` is a thin preamble — but
+          # un-caching a parent stage CASCADES to its children, so `builder` and
+          # `runtime` rebuild too. MEASURED with a control (run 29141995875):
+          # reading the same cache with NO filter, `[builder 4/4]` is CACHED; with
+          # `no-cache-filters: base` it rebuilds. Post-ip#132 publishes therefore
+          # still show ZERO `CACHED` lines (confirmed, run 29142394336).
+          #
+          # They are retained as the CONTROL ARM, not as an optimisation. If the
+          # filter ever silently breaks (stage renamed, action input renamed, key
+          # "tidied" back to the singular), `cache-from` serves the frozen apt
+          # layer again and the old packages return. Delete it and the same
+          # breakage is SILENT: nothing to serve, apt re-runs anyway, publish goes
+          # green, and a WORKING filter and a COMPLETELY BROKEN one produce
+          # byte-identical evidence. That is the self-certifying configuration
+          # ip#127 existed to destroy.
           #
           # BOTH lines are load-bearing. `cache-to` is what keeps the detector
           # alive — GHA cache entries evict when unused, so dropping ONLY
           # `cache-to` silently empties `cache-from` and kills the guard without
           # touching it. Keep both or keep neither.
           #
-          # Do NOT price this decision. Every number attached to it was measured in
-          # the wrong arm: the ~80s was a `load: true` harness artefact; the 3.5s
-          # uv saving exists only in the CONTROL arm and is unreachable once the
-          # filter is on; "zero" ignored `cache-to` entirely. What IS measured:
-          # `cache-from` costs 0.1s (`importing cache manifest from gha … DONE
-          # 0.1s`, treatment arm) — effectively free. What is NOT: `cache-to
-          # mode=max` re-exports every layer on every publish, and the proof
-          # harness omitted `cache-to` BY DESIGN, so nobody has priced it. Read it
-          # off the first real publish; do not delete these lines on the strength
-          # of a number until then.
+          # WHAT THE DETECTOR NO LONGER GIVES YOU, and this is the important part:
+          # it used to be read out by Trivy going RED. ip#132 removed
+          # `build-essential` and `curl`, which brought in `linux-libc-dev` and
+          # `libssh2-1t64` — the packages carrying 10 of the 10 HIGH CVEs. A frozen
+          # `base` now has far less left to accumulate CVEs in, so that readout is
+          # much weaker and may effectively stop firing. Good for security; bad for
+          # the alarm. DO NOT rely on "Trivy goes red" as the tripwire. The
+          # replacement is an explicit staleness check (`apt-get -s upgrade` against
+          # the built image, OUTSIDE the build — inside a RUN it becomes part of the
+          # layer it polices). Tracked in ip#137. `cache-from` creates the
+          # condition; the tripwire reads it; NEITHER DOES ANYTHING ALONE.
           #
-          # Honest sensitivity — do not oversell this detector: it is NOT an
-          # instant tripwire. With `cache-to` writing fresh layers each publish, a
+          # PRICED, finally, and in the right arm. Earlier numbers were all measured
+          # in the wrong one: the ~80s was a `load: true` harness artefact; the 3.5s
+          # uv saving exists only in the CONTROL arm and is unreachable once the
+          # filter is on; "zero" ignored `cache-to` entirely. The real figures, off
+          # the production publish (run 29142394336) — and note the export has TWO
+          # phases; grepping only `sending` is how the number came out wrong:
+          #
+          #   cache-from  importing cache manifest ……………………………  0.1s  (free)
+          #   cache-to    preparing build cache for export ……… 25.5s
+          #   cache-to    sending cache export ………………………………… 63.1s   } 88.6s
+          #
+          # Hence `mode=min` below (ip#137). `mode=max` exports every stage's
+          # layers including all of `builder`'s intermediates, which never appear in
+          # the shipped image. `mode=min` exports only the final image's layers —
+          # and MEASURED with a control (run 29142720595), the detector SURVIVES:
+          # reading a `mode=min` cache, `[base 2/2]` still comes back CACHED, so a
+          # broken filter can still be served a frozen layer. Export cost fell ~63%
+          # in the scratch arm (60.4s -> 22.4s). The RATIO transfers; the ABSOLUTE
+          # saving against the 88.6s above must be read off a real publish — do not
+          # write down a production figure nobody has measured.
+          #
+          # Honest sensitivity — do not oversell this detector: it is NOT an instant
+          # tripwire. With `cache-to` writing fresh layers each publish, a
           # newly-broken filter serves a layer at most one publish old, and the
-          # gate only reddens once a NEW fixed HIGH CVE lands against it. Days to
-          # weeks — which is exactly the five days we just lived through.
+          # readout only fires once something new lands against it. Days to weeks —
+          # exactly the five days we lived through. That latency is the reason the
+          # ip#137 tripwire exists.
           #
           # Whether ip#132's base/builder/runtime split restores caching is
           # UNTESTED and genuinely open: `builder` derives FROM `base`, so
@@ -150,7 +180,7 @@ jobs:
           # changes nothing produces an identical layer. Measure it. Do not write
           # down either answer.
           cache-from: type=gha,scope=workers
-          cache-to: type=gha,mode=max,scope=workers
+          cache-to: type=gha,mode=min,scope=workers
           # Exclude the `base` stage — the digest-pinned FROM plus the in-image
           # `apt-get -y upgrade` — from the layer cache, so the upgrade actually
           # RUNS on every publish instead of being replayed as a cached no-op.
