@@ -102,34 +102,60 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # NOTE — these two are currently INERT. The Dockerfile is still
-          # SINGLE-STAGE, so `base` is not a preamble: it IS the whole image, and
-          # excluding it from the cache uncaches every layer. Expect a publish log
-          # with NO `CACHED` lines at all; that is correct, not anomalous.
+          # DO NOT DELETE THESE TWO LINES.
           #
-          # Measured on the ip#127 proof run (29139568901), by STAGE-STEP LABEL:
+          # They look like a dead speed optimisation — nothing cache-hits today.
+          # They are not an optimisation at all. They are the CONTROL ARM of a
+          # standing experiment: the regression detector for the
+          # `no-cache-filters` line below.
           #
-          #   [base 2/9] RUN apt-get … upgrade   control: CACHED   filter: 11.8s
-          #   [base 6/9] RUN uv … pip install    control: CACHED   filter:  3.5s
+          # Nothing cache-hits because the Dockerfile is still SINGLE-STAGE, so
+          # `base` is not a preamble — it IS the whole image, and excluding it
+          # uncaches every layer. Expect a publish log with NO `CACHED` lines at
+          # all; that is correct, not anomalous. And note what follows: TODAY THE
+          # SECURITY PROPERTY DOES NOT REST ON THE FILTER AT ALL. Nothing could
+          # serve a stale apt layer even if the filter were dead. The filter only
+          # starts carrying weight once ip#132 splits this into base/builder/
+          # runtime. These two lines are how we find out whether it still works on
+          # the day it starts to matter:
+          #
+          #   cache import KEPT, filter later breaks (stage renamed / the action
+          #     renames its input / someone "tidies" the key back to the singular
+          #     `no-cache-filter`) -> buildx serves the frozen apt layer -> stale
+          #     packages -> TRIVY GOES RED -> we find out that day.
+          #
+          #   cache import DELETED, filter breaks the same way -> there is nothing
+          #     to serve, apt re-runs anyway -> TRIVY GOES GREEN -> the dead flag
+          #     is INVISIBLE. It rots until the split lands, cache config gets
+          #     re-added "for speed", and the filter turns out to have been broken
+          #     the whole time with nothing to say so.
+          #
+          # That second row is this very bug in a new costume: a guard that goes
+          # quiet in exactly the case it exists to catch. Keeping the detector
+          # costs ~15s of layer work per publish — measured by STAGE-STEP LABEL on
+          # run 29139568901: `[base 2/9] RUN apt-get … upgrade` CACHED in control
+          # vs 11.8s under the filter; `[base 6/9] RUN uv … pip install` 3.5s.
+          # That is a very cheap standing detector for a defect that sat
+          # undetected on `main` for five days.
           #
           # Cite layers by their `[base N/9]` label, NEVER by buildx vertex number
           # (`#10`, `#18`, …): those are assigned in solve order and are NOT stable
-          # across builds — the same `#N` is a different layer in a different run.
+          # across builds. In that run's CONTROL arm the apt layer is `#12`, not
+          # `#10` — `#10` is a COPY. Anyone grepping `#10` in the control log to
+          # check our work would find a COPY and conclude the proof was fabricated.
+          # An unstable identifier can manufacture a refutation as easily as a
+          # confirmation.
           #
-          # So the cost of un-caching is ~15s of layer work (job wall-clock delta
-          # was ~12s). It is NOT the ~80s an earlier revision of this comment
-          # claimed: that number came from `exporting to docker image format`,
-          # which exists only because the proof harness used `load: true`. A real
-          # `push: true` publish never runs that step.
-          #
-          # Which means the thing these two lines would protect — the uv install —
-          # is a 3.5s layer. Caching it buys ~3.5s. Whether ip#132's
-          # base/builder/runtime split would even restore that is UNTESTED, and
-          # doubtful: `builder` derives FROM `base`, so un-caching the parent
-          # plausibly cascades to its children anyway. Do not write down that the
-          # split fixes the cache until someone measures it. If it does not — or if
-          # 3.5s is judged not worth the config — DELETE THESE TWO LINES. Dead
-          # config that looks alive is how the next reader gets misled.
+          # OPEN QUESTION, and it stays open: whether ip#132's split ALSO restores
+          # caching as a speed win. It may not (`builder` derives FROM `base`, so
+          # un-caching the parent may cascade to its children) or it may (BuildKit
+          # chains a child's key on the parent's RESULT, so a re-run apt producing
+          # a byte-identical layer still lets children hit — and when a package
+          # genuinely upgrades, the parent digest changes and children correctly
+          # rebuild, which is the behaviour you want). Nobody's belief goes in this
+          # comment; measure it in ip#132. Either answer is a fact about SPEED and
+          # licenses deleting nothing — the detector above is why these two lines
+          # stay regardless.
           cache-from: type=gha,scope=workers
           cache-to: type=gha,mode=max,scope=workers
           # Exclude the `base` stage — the digest-pinned FROM plus the in-image
