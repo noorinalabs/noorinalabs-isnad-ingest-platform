@@ -52,7 +52,25 @@ jobs:
           # upstream fix released. parse_email is not used anywhere in this repo
           # (grep -rn parse_email is empty) → non-applicable. Tracked in
           # noorinalabs-main#703; revisit each wave for an upstream fix.
-          uv run pip-audit --strict --desc --ignore-vuln GHSA-g75f-g53v-794x -r /tmp/requirements.txt
+          #
+          # PYSEC-2026-1325 (aliases CVE-2024-23342 / GHSA-wj6h-64fc-37mp):
+          # python-ecdsa Minerva timing attack on P-256. No upstream fix and none
+          # coming — the project considers side-channel attacks out of scope.
+          # `ecdsa` cannot be dropped: it is pulled by python-jose, which the
+          # admin API genuinely uses.
+          #
+          # Non-applicable because the vulnerable primitive is UNREACHABLE, not
+          # merely unused in one direction: src/api/auth.py:123,129 calls
+          # jwt.decode(token, jwks, algorithms=["RS256"]). The allowlist is
+          # RS256 — RSA. The advisory is a timing attack on ECDSA P-256 scalar
+          # multiplication, a code path this repo never enters. `ecdsa` is
+          # installed only because python-jose declares it.
+          #
+          # REVOKES THIS EXEMPTION: admitting an EC algorithm (ES256/ES384/
+          # ES512) into that allowlist. If you change it, this ignore must be
+          # re-justified — the "unreachable primitive" rationale dies there.
+          # Tracked in ingest#128; revisit each wave.
+          uv run pip-audit --strict --desc --ignore-vuln GHSA-g75f-g53v-794x --ignore-vuln PYSEC-2026-1325 -r /tmp/requirements.txt
 
   test:
     runs-on: ubuntu-latest

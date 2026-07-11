@@ -149,7 +149,17 @@ repos:
         # ReDoS — no upstream fix; parse_email unused in this repo → non-
         # applicable. Tracked in noorinalabs-main#703; revisit each wave. Kept
         # identical to ci.yml's security-audit invocation (local⇄CI parity).
-        entry: bash -c 'uv export --no-hashes --frozen --no-emit-project > /tmp/requirements.txt && uv run pip-audit --strict --desc --ignore-vuln GHSA-g75f-g53v-794x -r /tmp/requirements.txt'
+        #
+        # --ignore-vuln PYSEC-2026-1325 (aliases CVE-2024-23342 /
+        # GHSA-wj6h-64fc-37mp): python-ecdsa Minerva timing attack on P-256. No
+        # upstream fix and none coming (side-channels are out of scope for that
+        # project). Non-applicable because the vulnerable primitive is
+        # unreachable: src/api/auth.py:123,129 decodes with
+        # algorithms=["RS256"] — RSA, not ECDSA — so the P-256 scalar-mult path
+        # is never entered. `ecdsa` is present only because python-jose declares
+        # it. Admitting an EC algorithm (ES256/ES384/ES512) into that allowlist
+        # REVOKES this exemption. Tracked in ingest#128; revisit each wave.
+        entry: bash -c 'uv export --no-hashes --frozen --no-emit-project > /tmp/requirements.txt && uv run pip-audit --strict --desc --ignore-vuln GHSA-g75f-g53v-794x --ignore-vuln PYSEC-2026-1325 -r /tmp/requirements.txt'
         language: system
         pass_filenames: false
         always_run: true
