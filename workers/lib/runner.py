@@ -27,6 +27,10 @@ __all__ = ["ProcessFn", "WorkerRunner", "WorkerSettings"]
 
 _logger = get_logger("workers.runner")
 
+# Sentinel batch_id used for the error metric when a message cannot be parsed.
+# There is no real ``batch_id`` to attribute the failure to at that point (#141).
+UNPARSEABLE_BATCH_ID = "<unparseable>"
+
 
 class ProcessFn(Protocol):
     """Per-batch processor. Returns the next-stage message, or ``None`` to drop."""
@@ -99,7 +103,29 @@ class WorkerRunner:
 
     def handle_one(self, raw_value: bytes | str | dict[str, Any]) -> None:
         """Process a single Kafka message value. Testable without a real consumer."""
-        msg = parse_message(raw_value)
+        # Parse INSIDE a DLQ guard (#141, BUG-03b). A malformed or
+        # contract-breaking message must be quarantined to the DLQ — not crash
+        # the consumer loop and take the whole worker down. No PipelineMessage
+        # exists yet, so the DLQ record carries the raw payload in place of a
+        # structured ``original``.
+        try:
+            msg = parse_message(raw_value)
+        except Exception as exc:  # noqa: BLE001 — DLQ quarantines every parse failure
+            record = build_dlq_record(
+                worker=self.settings.worker_name,
+                original=None,
+                exc=exc,
+                raw_payload=raw_value,
+            )
+            self.producer.send(self.settings.dlq_topic, record.to_bytes())
+            self.metrics.errors(batch_id=UNPARSEABLE_BATCH_ID, error_class=type(exc).__name__)
+            _logger.error(
+                "message_unparseable",
+                worker=self.settings.worker_name,
+                error_class=type(exc).__name__,
+                error=str(exc),
+            )
+            return
 
         if self.checkpoint.seen(msg.batch_id):
             _logger.info(
