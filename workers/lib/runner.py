@@ -144,5 +144,19 @@ class WorkerRunner:
         """Consume indefinitely. ``stop`` is a hook the tests use to break the loop."""
         for record in self.consumer:
             self.handle_one(record.value)
+            # Commit the offset only AFTER ``handle_one`` returns without
+            # raising. Its success path ends at ``checkpoint.mark()``; its DLQ
+            # and idempotent-skip paths also return normally once the batch is
+            # durably accounted for. A send failure in the mark/send window
+            # (#43) raises out of ``handle_one``, so the commit is skipped and
+            # the batch is re-consumed from the last committed offset on
+            # restart — at-least-once, never a silently lost message.
+            #
+            # Consumers are constructed with ``enable_auto_commit=False`` and
+            # ``auto_offset_reset="earliest"`` (see ``workers/*/main.py``), so
+            # this manual commit is the sole offset authority and a cold
+            # consumer group resumes from the oldest retained offset instead of
+            # jumping to ``latest`` and dropping the in-flight backlog.
+            self.consumer.commit()
             if stop is not None and stop():
                 break

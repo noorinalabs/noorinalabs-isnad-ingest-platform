@@ -25,7 +25,14 @@ class FakeProducer:
 
 
 class FakeConsumer:
-    """Iterable yielding pre-seeded records (each with a ``.value`` attr)."""
+    """Iterable yielding pre-seeded records (each with a ``.value`` attr).
+
+    ``commit()`` is a no-op counter so ``WorkerRunner.run_forever`` — which
+    commits the offset after every durably handled message — can drive this
+    fake without a real broker. Tests needing offset/restart semantics use the
+    richer ``FakeBroker``/``OffsetTrackingConsumer`` pair in
+    ``test_runner.py``; this counter just proves a commit was issued.
+    """
 
     class _Record:
         def __init__(self, value: Any) -> None:
@@ -33,9 +40,13 @@ class FakeConsumer:
 
     def __init__(self, values: list[Any]) -> None:
         self._records = [self._Record(v) for v in values]
+        self.commit_count = 0
 
     def __iter__(self):
         return iter(self._records)
+
+    def commit(self) -> None:
+        self.commit_count += 1
 
 
 class _FakeStreamingBody(io.IOBase):
