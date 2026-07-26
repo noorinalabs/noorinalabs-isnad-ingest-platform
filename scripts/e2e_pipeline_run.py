@@ -180,6 +180,12 @@ class ListConsumer:
     def __iter__(self) -> Any:
         return iter(self._records)
 
+    def commit(self) -> None:
+        """No-op: ``run_forever`` commits the offset after each handled
+        message. This bounded in-process drain has no broker to talk to, so
+        the commit is a no-op — the at-least-once wiring is exercised end to
+        end by the real-Kafka Docker E2E and unit-tested in ``test_runner.py``."""
+
 
 # ---------------------------------------------------------------------------
 # In-process Neo4j capture — runs the REAL Cypher the ingest stage builds.

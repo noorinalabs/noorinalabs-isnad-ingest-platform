@@ -31,10 +31,11 @@ pins two contracts that the existing suite leaves unguarded end to end:
 Determinism note
 ----------------
 Like the #55 E2E, each ``WorkerRunner`` here is the production
-``WorkerRunner`` + production processor, but built with a test-only consumer
-config (``auto_offset_reset="earliest"`` + a ``consumer_timeout_ms`` so
-``run_forever`` drains and returns instead of blocking like a long-lived
-worker). The topic topology and object hand-offs are unchanged.
+``WorkerRunner`` + production processor. It shares production's
+``auto_offset_reset="earliest"`` (ip#140) and adds only a test-only
+``consumer_timeout_ms`` so ``run_forever`` drains and returns instead of
+blocking like a long-lived worker. The topic topology and object hand-offs are
+unchanged.
 
 ML deps are NOT required: dedup and enrich both degrade gracefully (empty
 links / empty topics side-table + pass-through copy) without

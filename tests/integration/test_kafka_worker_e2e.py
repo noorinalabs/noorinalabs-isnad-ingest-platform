@@ -22,15 +22,15 @@ What is genuinely exercised here (vs the unit suite)
 
 Determinism note
 ----------------
-The production ``build_runner`` consumers use the kafka-python default
-``auto_offset_reset`` (``latest``) and block forever in ``run_forever`` — the
-right behavior for a long-lived worker, the wrong one for a bounded test. The
-stage runners here are built with the *same* ``WorkerRunner`` + production
-processors but a test-only consumer config (``auto_offset_reset="earliest"``,
-a ``consumer_timeout_ms`` so ``run_forever`` returns after draining). The flow
-across real topics is unchanged; only the consumer's start-offset and
-idle-timeout differ. The ``build_runner`` entrypoints themselves are covered
-by the separate wiring test above.
+The production ``build_runner`` consumers set ``auto_offset_reset="earliest"``
+(ip#140) and block forever in ``run_forever`` — the right behavior for a
+long-lived worker, the wrong idle behavior for a bounded test. The stage
+runners here are built with the *same* ``WorkerRunner`` + production processors
+and the *same* start-offset, adding only a test-only ``consumer_timeout_ms`` so
+``run_forever`` returns after draining instead of blocking. The flow across
+real topics is unchanged; only the consumer's idle-timeout differs. The
+``build_runner`` entrypoints themselves are covered by the separate wiring test
+above.
 
 ML deps are NOT required: enrich degrades gracefully (pass-through copy + empty
 topics side-table) without ``transformers``/``torch``, so the chain reaches
