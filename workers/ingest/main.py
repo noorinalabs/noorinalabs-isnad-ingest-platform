@@ -42,6 +42,7 @@ def build_runner() -> tuple[WorkerRunner, Driver]:
         bootstrap_servers=bootstrap,
         group_id=settings.consumer_group,
         enable_auto_commit=False,
+        auto_offset_reset="earliest",
     )
     producer = KafkaProducer(bootstrap_servers=bootstrap)
     store = ObjectStore(bucket=bucket, endpoint_url=endpoint_url)

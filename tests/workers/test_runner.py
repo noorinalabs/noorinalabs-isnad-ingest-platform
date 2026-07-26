@@ -1,8 +1,11 @@
-"""WorkerRunner behaviour: success, DLQ routing, idempotency."""
+"""WorkerRunner behaviour: success, DLQ routing, idempotency, offset commit."""
 
 from __future__ import annotations
 
+import ast
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -30,6 +33,51 @@ class _SendFailsProducer(FakeProducer):
         if topic == self._failing_topic:
             raise RuntimeError("broker unavailable")
         super().send(topic, value)
+
+
+class FakeBroker:
+    """A single-partition Kafka log with a per-group committed offset.
+
+    Models the two properties ip#140 depends on: a manual ``commit`` advances
+    the group's committed offset, and a fresh consumer resumes *from* that
+    committed offset — so a restart neither reprocesses an already-committed
+    message nor skips an uncommitted one. ``committed`` starts at 0, the head
+    of the log, which is where an ``auto_offset_reset="earliest"`` cold group
+    begins (and precisely the backlog a ``latest`` cold-start would drop).
+    """
+
+    def __init__(self, values: list[bytes]) -> None:
+        self.log = list(values)
+        self.committed = 0  # next offset a fresh consumer will deliver
+
+
+class OffsetTrackingConsumer:
+    """Reads a :class:`FakeBroker` from its committed offset; ``commit``
+    advances that offset to just past the last record handed out. A new
+    instance on the same broker models a worker restart."""
+
+    class _Record:
+        def __init__(self, value: bytes, offset: int) -> None:
+            self.value = value
+            self.offset = offset
+
+    def __init__(self, broker: FakeBroker) -> None:
+        self._broker = broker
+        self._pos = broker.committed
+        self._last_read: int | None = None
+        self.commit_count = 0
+
+    def __iter__(self) -> Any:
+        i = self._pos
+        while i < len(self._broker.log):
+            self._last_read = i
+            yield self._Record(self._broker.log[i], i)
+            i += 1
+
+    def commit(self) -> None:
+        self.commit_count += 1
+        if self._last_read is not None:
+            self._broker.committed = self._last_read + 1
 
 
 def _settings() -> WorkerSettings:
@@ -296,3 +344,159 @@ def test_handle_one_quarantines_contract_drift_message() -> None:
     record = json.loads(value)
     assert record["original"] is None
     assert record["error_class"] == "ValidationError"
+
+
+# ---------------------------------------------------------------------------
+# ip#140 — offset commit (data-loss regression)
+# ---------------------------------------------------------------------------
+
+
+def test_offset_committed_only_after_checkpoint_mark(sample_message: PipelineMessage) -> None:
+    """ip#140: ``run_forever`` must commit the Kafka offset, and only *after*
+    the batch is durably checkpointed. Committing before ``checkpoint.mark``
+    (or the pre-fix behaviour of never committing at all) is the data-loss the
+    issue describes. The recorded event order proves mark-then-commit."""
+    events: list[str] = []
+    producer = FakeProducer()
+
+    class _RecordingCheckpoint(InMemoryCheckpoint):
+        def mark(self, batch_id: str) -> None:
+            events.append("mark")
+            super().mark(batch_id)
+
+    class _RecordingConsumer(OffsetTrackingConsumer):
+        def commit(self) -> None:
+            events.append("commit")
+            super().commit()
+
+    checkpoint = _RecordingCheckpoint()
+    broker = FakeBroker([serialize_message(sample_message)])
+    consumer = _RecordingConsumer(broker)
+
+    def process(msg: PipelineMessage) -> PipelineMessage:
+        return msg.to_next_stage(b2_path="dedup/x.parquet")
+
+    runner = WorkerRunner(
+        settings=_settings(),
+        consumer=consumer,
+        producer=producer,
+        process=process,
+        checkpoint=checkpoint,
+    )
+    runner.run_forever()
+
+    assert events == ["mark", "commit"]
+    assert consumer.commit_count == 1
+    assert broker.committed == 1  # offset advanced past the handled message
+    assert checkpoint.seen(sample_message.batch_id) is True
+
+
+def test_restart_resumes_from_committed_offset(sample_message: PipelineMessage) -> None:
+    """ip#140: after a commit, a restarted worker resumes at the committed
+    offset — it neither reprocesses the committed message nor cold-starts past
+    the uncommitted backlog (the ``auto_offset_reset="latest"`` data loss)."""
+    m1 = sample_message
+    m2 = PipelineMessage(batch_id="batch-002", source="s", b2_path="raw/y", record_count=3)
+    broker = FakeBroker([serialize_message(m1), serialize_message(m2)])
+
+    # A durable checkpoint that survives the "restart" (same instance reused).
+    checkpoint = InMemoryCheckpoint()
+    producer = FakeProducer()
+    seen: list[str] = []
+
+    def process(msg: PipelineMessage) -> PipelineMessage:
+        seen.append(msg.batch_id)
+        return msg.to_next_stage(b2_path=f"dedup/{msg.batch_id}.parquet")
+
+    # First worker instance: handle exactly one message, commit, then stop —
+    # simulating a crash/redeploy right after the first offset is committed.
+    consumer1 = OffsetTrackingConsumer(broker)
+    runner1 = WorkerRunner(
+        settings=_settings(),
+        consumer=consumer1,
+        producer=producer,
+        process=process,
+        checkpoint=checkpoint,
+    )
+    runner1.run_forever(stop=lambda: True)
+
+    assert seen == ["batch-001"]
+    assert broker.committed == 1  # first offset committed before the stop
+
+    # Restart: a brand-new consumer on the same broker resumes at the committed
+    # offset (1) and delivers only the un-handled backlog — m1 is not replayed.
+    consumer2 = OffsetTrackingConsumer(broker)
+    runner2 = WorkerRunner(
+        settings=_settings(),
+        consumer=consumer2,
+        producer=producer,
+        process=process,
+        checkpoint=checkpoint,
+    )
+    runner2.run_forever()
+
+    assert seen == ["batch-001", "batch-002"]  # m1 processed once, m2 resumed
+    assert broker.committed == 2
+
+
+def test_send_failure_skips_commit_so_batch_is_reprocessed(
+    sample_message: PipelineMessage,
+) -> None:
+    """ip#140 × #43: if the downstream send raises, the offset must NOT be
+    committed, so the batch is re-consumed on restart (at-least-once). A commit
+    here would strand the batch behind an advanced offset — silent loss."""
+    producer = _SendFailsProducer(failing_topic="out")
+    checkpoint = InMemoryCheckpoint()
+    broker = FakeBroker([serialize_message(sample_message)])
+    consumer = OffsetTrackingConsumer(broker)
+
+    def process(msg: PipelineMessage) -> PipelineMessage:
+        return msg.to_next_stage(b2_path="dedup/x.parquet")
+
+    runner = WorkerRunner(
+        settings=_settings(),
+        consumer=consumer,
+        producer=producer,
+        process=process,
+        checkpoint=checkpoint,
+    )
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        runner.run_forever()
+
+    assert consumer.commit_count == 0
+    assert broker.committed == 0  # offset NOT advanced — batch replays on restart
+    assert checkpoint.seen(sample_message.batch_id) is False
+
+
+def _kafka_consumer_kwargs(source: str) -> dict[str, ast.expr]:
+    """Return the keyword args of the ``KafkaConsumer(...)`` call in ``source``."""
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "KafkaConsumer"
+        ):
+            return {kw.arg: kw.value for kw in node.keywords if kw.arg}
+    raise AssertionError("no KafkaConsumer(...) call found in worker main")
+
+
+@pytest.mark.parametrize("worker", ["dedup", "enrich", "normalize", "ingest"])
+def test_worker_consumer_config_prevents_offset_dataloss(worker: str) -> None:
+    """ip#140: every one of the four worker consumers must (a) keep
+    ``enable_auto_commit=False`` so the manual at-least-once commit in
+    ``run_forever`` is the sole offset authority, and (b) set
+    ``auto_offset_reset="earliest"`` so a cold consumer group replays the
+    retained backlog instead of jumping to ``latest`` and silently dropping
+    in-flight messages."""
+    main_path = Path(__file__).resolve().parents[2] / "workers" / worker / "main.py"
+    kwargs = _kafka_consumer_kwargs(main_path.read_text())
+
+    reset = kwargs.get("auto_offset_reset")
+    assert isinstance(reset, ast.Constant) and reset.value == "earliest", (
+        f"{worker}: consumer must set auto_offset_reset='earliest'"
+    )
+    auto_commit = kwargs.get("enable_auto_commit")
+    assert isinstance(auto_commit, ast.Constant) and auto_commit.value is False, (
+        f"{worker}: consumer must set enable_auto_commit=False"
+    )
