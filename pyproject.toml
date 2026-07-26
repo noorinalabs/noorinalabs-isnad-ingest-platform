@@ -25,13 +25,26 @@ dependencies = [
     "tqdm>=4.66",
     "tenacity>=8.2",
     "rapidfuzz>=3.6",
-    "kafka-python>=2.0",
+    # PYSEC-2026-2191: SCRAM iteration-count DoS (unbounded pbkdf2_hmac), fixed in
+    # 2.3.2. Held to the 2.x line — >=2.3.2 alone lets the resolver jump to 3.0.x
+    # (a major API break for the worker consumer/offset path); the CVE is cleared
+    # on 2.x, so bump minimally and defer any 3.x migration to its own change.
+    "kafka-python>=2.3.2,<3",
     "boto3>=1.34",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "python-jose[cryptography]>=3.3",
     "starlette>=1.3.1",  # CVE-2026-54283 (urlencoded-form DoS) + CVE-2026-54282 (request.url host spoof); transitive via fastapi
     "cryptography>=48.0.1",  # GHSA-537c-gmf6-5ccf (statically-linked OpenSSL in wheels); transitive via python-jose[cryptography]
+    # pyasn1 is transitive via python-jose[cryptography] -> rsa -> pyasn1. Pin a
+    # direct floor to clear the 0.6.3 quadratic-decode DoS advisories
+    # PYSEC-2026-3455/3456/3457 (long-form tag, OID/RELATIVE-OID arcs, univ.Real
+    # exponent), all fixed in 0.6.4.
+    "pyasn1>=0.6.4",
+    # click is transitive via uvicorn[standard] (and typer). Pin a direct floor
+    # to clear PYSEC-2026-2132 (command injection in click.edit()), fixed in
+    # 8.3.3.
+    "click>=8.3.3",
 ]
 
 [project.scripts]
