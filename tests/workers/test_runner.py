@@ -288,6 +288,64 @@ def test_successful_send_then_marks_checkpoint(
     assert len(producer.sent) == 1
 
 
+def test_handle_one_quarantines_unparseable_message_instead_of_crashing() -> None:
+    """BUG-03b (#141): a malformed message value must be routed to the DLQ, NOT
+    crash the consumer loop. Before the fix ``parse_message`` sat OUTSIDE the DLQ
+    try, so a single bad message took the whole dedup worker down."""
+    producer = FakeProducer()
+    processed: list[PipelineMessage] = []
+
+    def process(msg: PipelineMessage) -> PipelineMessage:
+        processed.append(msg)
+        return msg
+
+    runner = WorkerRunner(
+        settings=_settings(),
+        consumer=FakeConsumer([]),
+        producer=producer,
+        process=process,
+    )
+
+    # Not valid JSON — parse_message raises. Must be quarantined, not fatal.
+    runner.handle_one(b"this is not json")
+
+    assert processed == []  # process never ran
+    assert len(producer.sent) == 1
+    topic, value = producer.sent[0]
+    assert topic == DLQ_TOPIC
+    record = json.loads(value)
+    assert record["original"] is None
+    assert record["raw_payload"] == "this is not json"
+    assert record["error_class"]  # some parse/decoding error was captured
+
+
+def test_handle_one_quarantines_contract_drift_message() -> None:
+    """A well-formed JSON object that breaks the PipelineMessage contract
+    (missing required field, or an extra field under extra='forbid') is a
+    producer↔consumer drift — it must be quarantined to the DLQ, not fatal."""
+    producer = FakeProducer()
+
+    def process(msg: PipelineMessage) -> PipelineMessage:  # pragma: no cover - never reached
+        return msg
+
+    runner = WorkerRunner(
+        settings=_settings(),
+        consumer=FakeConsumer([]),
+        producer=producer,
+        process=process,
+    )
+
+    # Missing required b2_path / record_count -> ValidationError inside parse.
+    runner.handle_one(json.dumps({"batch_id": "b1", "source": "s"}).encode("utf-8"))
+
+    assert len(producer.sent) == 1
+    topic, value = producer.sent[0]
+    assert topic == DLQ_TOPIC
+    record = json.loads(value)
+    assert record["original"] is None
+    assert record["error_class"] == "ValidationError"
+
+
 # ---------------------------------------------------------------------------
 # ip#140 — offset commit (data-loss regression)
 # ---------------------------------------------------------------------------
