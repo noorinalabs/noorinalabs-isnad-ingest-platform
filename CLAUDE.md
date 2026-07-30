@@ -74,10 +74,10 @@ docker compose up --build
 
 | Worker | Consumes | Produces | Ported from |
 |---|---|---|---|
-| `dedup-worker` | `pipeline.raw.new` | `pipeline.dedup.done` | `src/resolve/` |
+| `dedup-worker` | `pipeline.raw.landed` | `pipeline.dedup.done` | `src/resolve/` |
 | `enrich-worker` | `pipeline.dedup.done` | `pipeline.enrich.done` | `src/enrich/` |
-| `normalize-worker` | `pipeline.enrich.done` | `pipeline.norm.done` | (new) |
-| `ingest-worker` | `pipeline.norm.done` | Neo4j (terminal) | `src/graph/` |
+| `normalize-worker` | `pipeline.enrich.done` | `pipeline.normalize.done` | (new) |
+| `ingest-worker` | `pipeline.normalize.done` | Neo4j (terminal) | `src/graph/` |
 
 All failures route to `pipeline.dlq`. Each worker is its own container; the shared consume/fetch/process/write/publish/DLQ loop, the pointer-message schema, the S3 client, checkpointing, and metrics live in `workers/lib/`. A single multi-stage image (top-level `Dockerfile`) is the artifact the deployed stack pulls; the stage is selected at start time by the compose service's `command:`. The per-stage `workers/<stage>/Dockerfile` images remain for the self-contained local-dev compose.
 
