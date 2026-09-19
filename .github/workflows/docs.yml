@@ -43,7 +43,7 @@ jobs:
     name: Markdown lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: markdownlint-cli2
         # Config (.markdownlint-cli2.jsonc) carries the glob + ignores and
         # disables the stylistic rules the docs corpus intentionally uses,
@@ -54,7 +54,7 @@ jobs:
     name: Spellcheck (cspell)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: cspell
         uses: streetsidesoftware/cspell-action@de2a73e963e7443969755b648a1008f77033c5b2 # v8.4.0
         with:
@@ -79,7 +79,7 @@ jobs:
     name: Internal link-check (lychee)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: lychee
         uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
         with:
@@ -96,8 +96,8 @@ jobs:
     name: Config — YAML/JSON syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Validate committed YAML + JSON parse
@@ -151,7 +151,7 @@ jobs:
     name: Config — Workflow actionlint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Download and verify actionlint
         env:
           # Pinned: version + linux_amd64 tarball SHA256 from upstream's

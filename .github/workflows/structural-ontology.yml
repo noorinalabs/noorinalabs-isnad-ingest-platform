@@ -78,7 +78,7 @@ jobs:
           fi
           echo "fetched ontology_gen from noorinalabs-main@${{ steps.sibling-ref.outputs.ref }}"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
